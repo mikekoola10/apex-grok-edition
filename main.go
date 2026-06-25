@@ -16,19 +16,21 @@ import (
 	"github.com/google/uuid"
 )
 
-// Task represents a single autonomous task (enhanced for Phase 4)
+// Task represents a single autonomous task (enhanced for Phase 6)
 type Task struct {
-	ID          string    `json:"id"`
-	Goal        string    `json:"goal"`
-	Status      string    `json:"status"` // queued, running, paused, completed, stopped
-	SubTasks    []SubTask `json:"subtasks"`
-	Artifacts   []string  `json:"artifacts"`
-	Logs        []string  `json:"logs"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	SandboxID   string    `json:"sandbox_id"`
-	Workspace   string    `json:"workspace,omitempty"`
-	Progress    int       `json:"progress"` // 0-100
+	ID            string    `json:"id"`
+	Goal          string    `json:"goal"`
+	Status        string    `json:"status"` // queued, running, paused, completed, stopped
+	SubTasks      []SubTask `json:"subtasks"`
+	Artifacts     []string  `json:"artifacts"`
+	Logs          []string  `json:"logs"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+	SandboxID     string    `json:"sandbox_id"`
+	Workspace     string    `json:"workspace,omitempty"`
+	Progress      int       `json:"progress"` // 0-100
+	Deployed      bool      `json:"deployed"`
+	DeploymentURL string    `json:"deployment_url,omitempty"`
 }
 
 // SubTask for multi-agent decomposition
@@ -51,9 +53,9 @@ func init() {
 	go processQueue()
 }
 
-// DeepSeek decomposition (Phase 4)
+// DeepSeek decomposition
 func decomposeGoal(goal string) []SubTask {
-	log.Printf("🤖 DeepSeek decomposing: %s", goal)
+	log.Printf("🤖 DeepSeek decomposing goal: %s", goal)
 	lowerGoal := strings.ToLower(goal)
 	if strings.Contains(lowerGoal, "analyze") || strings.Contains(lowerGoal, "local") || strings.Contains(lowerGoal, "files") {
 		return []SubTask{
@@ -89,12 +91,12 @@ func processQueue() {
 }
 
 func executeTaskAsync(task *Task) {
-	log.Printf("🔄 Starting async execution for task %s", task.ID)
+	log.Printf("🔄 Async execution started for task: %s", task.ID)
 
 	mu.Lock()
 	task.Status = "running"
 	task.UpdatedAt = time.Now()
-	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Async execution started", time.Now().Format(time.RFC3339)))
+	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Audit: Background execution started", time.Now().Format(time.RFC3339)))
 	mu.Unlock()
 
 	var wg sync.WaitGroup
@@ -123,12 +125,12 @@ func executeTaskAsync(task *Task) {
 	if task.Status != "stopped" {
 		task.Status = "completed"
 		task.Progress = 100
-		task.Logs = append(task.Logs, fmt.Sprintf("[%s] Task completed successfully", time.Now().Format(time.RFC3339)))
+		task.Logs = append(task.Logs, fmt.Sprintf("[%s] Audit: All subtasks completed successfully", time.Now().Format(time.RFC3339)))
 	}
 	task.UpdatedAt = time.Now()
 	mu.Unlock()
 
-	log.Printf("🎉 Async task %s completed", task.ID)
+	log.Printf("🎉 Task %s fully completed", task.ID)
 	notifyCompletion(task)
 }
 
@@ -173,7 +175,7 @@ func executeComputerUse(st *SubTask, task *Task) {
 		task.Workspace = workspace
 	}
 	workspace := task.Workspace
-	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Computer-Use activated in workspace: %s", time.Now().Format(time.RFC3339), workspace))
+	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Computer: Activated in workspace %s", time.Now().Format(time.RFC3339), workspace))
 	mu.Unlock()
 
 	cmds := []string{}
@@ -182,29 +184,29 @@ func executeComputerUse(st *SubTask, task *Task) {
 		cmds = append(cmds, "ls -la")
 	}
 	if strings.Contains(lowerGoal, "create") || strings.Contains(lowerGoal, "report") {
-		cmds = append(cmds, "echo 'Computer Use Report' > report.txt")
+		cmds = append(cmds, "echo 'Apex Audit Report' > audit.txt")
 	}
 
 	results := []string{}
 	for _, c := range cmds {
 		output, err := runSafeCommand(c, workspace)
 		if err != nil {
-			results = append(results, fmt.Sprintf("Error executing '%s': %v", c, err))
+			results = append(results, fmt.Sprintf("Error: %v", err))
 		} else {
-			results = append(results, fmt.Sprintf("Command '%s' output: %s", c, strings.TrimSpace(output)))
+			results = append(results, strings.TrimSpace(output))
 		}
 	}
 
 	mu.Lock()
-	st.Result = fmt.Sprintf("Computer-Use completed. Outputs: %v", results)
+	st.Result = fmt.Sprintf("Computer: Executed commands in %s", workspace)
 	st.Status = "completed"
-	task.Artifacts = append(task.Artifacts, "computer-use-log.txt")
-	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Computer-Use completed: %s", time.Now().Format(time.RFC3339), st.Result))
+	task.Artifacts = append(task.Artifacts, "computer-use.audit")
+	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Computer: Actions completed with outputs: %v", time.Now().Format(time.RFC3339), results))
 	mu.Unlock()
 }
 
 func executeSubTask(st *SubTask, task *Task) {
-	log.Printf("🚀 Routing to %s Freebuff agent: %s", st.Type, st.Goal)
+	log.Printf("🚀 Routing to %s agent: %s", st.Type, st.Goal)
 
 	if st.Type == "computer" {
 		executeComputerUse(st, task)
@@ -212,7 +214,7 @@ func executeSubTask(st *SubTask, task *Task) {
 	}
 
 	mu.Lock()
-	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Routing to %s agent: %s", time.Now().Format(time.RFC3339), st.Type, st.Goal))
+	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Agent %s: Routing goal: %s", time.Now().Format(time.RFC3339), st.Type, st.Goal))
 	mu.Unlock()
 
 	time.Sleep(600 * time.Millisecond)
@@ -220,28 +222,28 @@ func executeSubTask(st *SubTask, task *Task) {
 	mu.Lock()
 	switch st.Type {
 	case "browser":
-		st.Result = "Freebuff Browser: Researched and extracted web data"
+		st.Result = "Browser: Extracted relevant data"
 		task.Artifacts = append(task.Artifacts, "research.json")
 	case "code":
-		st.Result = "Freebuff Code: Generated/debugged code"
+		st.Result = "Code: Generated logic artifacts"
 		task.Artifacts = append(task.Artifacts, "generated-code.go")
 	case "data":
-		st.Result = "Freebuff Data: Analyzed results"
+		st.Result = "Data: Built analysis spreadsheet"
 		task.Artifacts = append(task.Artifacts, "comparison.xlsx")
 	case "file":
-		st.Result = "Freebuff File: Packaged final deliverables"
+		st.Result = "File: Packaged deliverables"
 		task.Artifacts = append(task.Artifacts, "final.zip")
 	default:
-		st.Result = fmt.Sprintf("%s agent processed", st.Type)
+		st.Result = "Agent: Processed subtask"
 	}
 
 	st.Status = "completed"
-	task.Logs = append(task.Logs, fmt.Sprintf("[%s] %s agent completed: %s", time.Now().Format(time.RFC3339), st.Type, st.Result))
+	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Agent %s: Task completed: %s", time.Now().Format(time.RFC3339), st.Type, st.Result))
 	mu.Unlock()
 }
 
 func notifyCompletion(task *Task) {
-	log.Printf("📧 AgentMail Notification: Task %s completed! Artifacts ready: %v", task.ID, task.Artifacts)
+	log.Printf("📧 Audit: Completion notification sent for task %s", task.ID)
 }
 
 func createTask(w http.ResponseWriter, r *http.Request) {
@@ -261,7 +263,7 @@ func createTask(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: time.Now(),
 		SandboxID: createSandbox(taskID),
 		Progress:  0,
-		Logs:      []string{fmt.Sprintf("[%s] Task created: %s", time.Now().Format(time.RFC3339), req.Goal)},
+		Logs:      []string{fmt.Sprintf("[%s] Audit: Task initialization: %s", time.Now().Format(time.RFC3339), req.Goal)},
 	}
 
 	mu.Lock()
@@ -272,7 +274,7 @@ func createTask(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"task_id": taskID, "status": "queued", "message": "Task queued for async execution",
+		"task_id": taskID, "status": "queued", "message": "APEX Mirror: Task queued for async execution",
 	})
 }
 
@@ -281,7 +283,7 @@ func stopTask(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	if task, exists := tasks[id]; exists {
 		task.Status = "stopped"
-		task.Logs = append(task.Logs, fmt.Sprintf("[%s] Task stopped by user", time.Now().Format(time.RFC3339)))
+		task.Logs = append(task.Logs, fmt.Sprintf("[%s] Audit: Task stopped by user", time.Now().Format(time.RFC3339)))
 		task.UpdatedAt = time.Now()
 		w.WriteHeader(http.StatusOK)
 	} else {
@@ -290,7 +292,8 @@ func stopTask(w http.ResponseWriter, r *http.Request) {
 	mu.Unlock()
 }
 
-func getTaskStatus(w http.ResponseWriter, r *http.Request, id string) {
+func getTaskStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
 	mu.RLock()
 	task, exists := tasks[id]
 	if !exists {
@@ -298,40 +301,14 @@ func getTaskStatus(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, "Task not found", http.StatusNotFound)
 		return
 	}
-	data, err := json.Marshal(task)
+	data, _ := json.Marshal(task)
 	mu.RUnlock()
-
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(data)
 }
 
-func getTaskOutput(w http.ResponseWriter, r *http.Request, id string) {
-	mu.RLock()
-	task, exists := tasks[id]
-	if !exists {
-		mu.RUnlock()
-		http.Error(w, "Task not found", http.StatusNotFound)
-		return
-	}
-	output := struct {
-		Artifacts []string  `json:"artifacts"`
-		SubTasks  []SubTask `json:"subtasks"`
-	}{
-		Artifacts: append([]string(nil), task.Artifacts...),
-		SubTasks:  append([]SubTask(nil), task.SubTasks...),
-	}
-	mu.RUnlock()
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(output)
-}
-
-func getTaskLogs(w http.ResponseWriter, r *http.Request, id string) {
+func getTaskLogs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
 	mu.RLock()
 	task, exists := tasks[id]
 	if !exists {
@@ -349,26 +326,82 @@ func getTaskLogs(w http.ResponseWriter, r *http.Request, id string) {
 		"status":  task.Status,
 		"progress": task.Progress,
 	}
-	data, err := json.Marshal(resp)
+	data, _ := json.Marshal(resp)
 	mu.RUnlock()
-
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(data)
 }
 
-func deleteTask(w http.ResponseWriter, r *http.Request, id string) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+func getTaskOutput(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	mu.RLock()
+	task, exists := tasks[id]
+	if !exists {
+		mu.RUnlock()
+		http.Error(w, "Task not found", http.StatusNotFound)
 		return
 	}
+	output := map[string]interface{}{
+		"artifacts": task.Artifacts,
+		"subtasks":  task.SubTasks,
+	}
+	data, _ := json.Marshal(output)
+	mu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
+}
+
+func deployTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	mu.Lock()
+	task, exists := tasks[id]
+	if !exists {
+		mu.Unlock()
+		http.Error(w, "Task not found", http.StatusNotFound)
+		return
+	}
+
+	// Simulate Apex Deployment
+	task.Deployed = true
+	task.DeploymentURL = fmt.Sprintf("https://apex-deploy.io/live/%s", id[:8])
+	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Audit: Apex Deployer: Artifacts deployed to %s", time.Now().Format(time.RFC3339), task.DeploymentURL))
+	task.UpdatedAt = time.Now()
+	mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"task_id": id,
+		"status": "deployed",
+		"deployment_url": task.DeploymentURL,
+	})
+}
+
+func getDashboard(w http.ResponseWriter, r *http.Request) {
+	mu.RLock()
+	activeCount := 0
+	for _, t := range tasks {
+		if t.Status == "running" || t.Status == "queued" {
+			activeCount++
+		}
+	}
+	data, _ := json.Marshal(map[string]interface{}{
+		"active_tasks": activeCount,
+		"total_tasks":  len(tasks),
+		"tasks":        tasks,
+		"message":      "APEX Mirror Dashboard - Real-time visibility",
+		"timestamp":    time.Now().Format(time.RFC3339),
+	})
+	mu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
+}
+
+func deleteTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
 	mu.Lock()
 	delete(tasks, id)
 	mu.Unlock()
-	log.Printf("🧹 Cleaned up task %s", id)
+	log.Printf("🧹 Audit: Task %s removed from memory", id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -401,22 +434,16 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /task", createTask)
-	mux.HandleFunc("GET /task/{id}/status", func(w http.ResponseWriter, r *http.Request) {
-		getTaskStatus(w, r, r.PathValue("id"))
-	})
-	mux.HandleFunc("GET /task/{id}/output", func(w http.ResponseWriter, r *http.Request) {
-		getTaskOutput(w, r, r.PathValue("id"))
-	})
-	mux.HandleFunc("GET /task/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
-		getTaskLogs(w, r, r.PathValue("id"))
-	})
-	mux.HandleFunc("DELETE /task/{id}", func(w http.ResponseWriter, r *http.Request) {
-		deleteTask(w, r, r.PathValue("id"))
-	})
+	mux.HandleFunc("GET /task/{id}/status", getTaskStatus)
+	mux.HandleFunc("GET /task/{id}/output", getTaskOutput)
+	mux.HandleFunc("GET /task/{id}/logs", getTaskLogs)
+	mux.HandleFunc("DELETE /task/{id}", deleteTask)
 	mux.HandleFunc("POST /task/{id}/stop", stopTask)
+	mux.HandleFunc("POST /task/{id}/deploy", deployTask)
 	mux.HandleFunc("POST /computer-use", computerUse)
+	mux.HandleFunc("GET /dashboard", getDashboard)
 
-	log.Println("🚀 Manus-Class Phase 4 Async Orchestrator running on :8080")
-	log.Println("✅ Background execution • Task queue • Stop/Resume • Notifications • Jules-ready")
+	log.Println("🚀 Manus-Class Phase 6 Orchestrator running on :8080")
+	log.Println("✅ DeepSeek • Freebuff Agents • Async • Computer Use • Apex Deployer • APEX Mirror")
 	log.Fatal(http.ListenAndServe(":8080", mux))
 }
