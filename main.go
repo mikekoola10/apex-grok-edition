@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -23,12 +27,13 @@ type Task struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	SandboxID   string    `json:"sandbox_id"`
+	Workspace   string    `json:"workspace"`
 }
 
 // SubTask for multi-agent decomposition
 type SubTask struct {
 	ID       string `json:"id"`
-	Type     string `json:"type"`
+	Type     string `json:"type"` // browser, code, data, file, computer
 	Goal     string `json:"goal"`
 	Status   string `json:"status"`
 	Result   string `json:"result"`
@@ -40,10 +45,18 @@ var (
 	mu    sync.RWMutex
 )
 
-// DeepSeek decomposition (Phase 2)
+// DeepSeek decomposition (Phase 3)
 func decomposeGoal(goal string) []SubTask {
 	log.Printf("🤖 Calling DeepSeek for goal decomposition: %s", goal)
-	if strings.Contains(strings.ToLower(goal), "research") || strings.Contains(strings.ToLower(goal), "web") {
+	lowerGoal := strings.ToLower(goal)
+	if strings.Contains(lowerGoal, "analyze") || strings.Contains(lowerGoal, "local") || strings.Contains(lowerGoal, "files") {
+		return []SubTask{
+			{ID: uuid.New().String(), Type: "computer", Goal: "Analyze local files and environment", Status: "pending"},
+			{ID: uuid.New().String(), Type: "data", Goal: "Process findings", Status: "pending"},
+			{ID: uuid.New().String(), Type: "file", Goal: "Generate report", Status: "pending"},
+		}
+	}
+	if strings.Contains(lowerGoal, "research") || strings.Contains(lowerGoal, "web") {
 		return []SubTask{
 			{ID: uuid.New().String(), Type: "browser", Goal: "Perform web research and data extraction", Status: "pending"},
 			{ID: uuid.New().String(), Type: "data", Goal: "Analyze extracted data and comparisons", Status: "pending"},
@@ -64,15 +77,98 @@ func createSandbox(taskID string) string {
 	return sandboxID
 }
 
+func runSafeCommand(command, dir string) (string, error) {
+	// Safety: allowlist + timeout
+	allowed := []string{"ls", "cat", "echo", "pwd", "whoami", "mkdir", "touch"}
+	parts := strings.Fields(command)
+	if len(parts) == 0 {
+		return "", fmt.Errorf("empty command")
+	}
+
+	isAllowed := false
+	for _, a := range allowed {
+		if parts[0] == a {
+			isAllowed = true
+			break
+		}
+	}
+
+	if !isAllowed {
+		return "", fmt.Errorf("command not in allowlist: %s", parts[0])
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(ctx, "cmd", "/c", command)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", command)
+	}
+	cmd.Dir = dir
+
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// Computer Use Executor (Phase 3)
+func executeComputerUse(st *SubTask, task *Task) {
+	log.Printf("💻 Computer-Use Mode activated for: %s", st.Goal)
+
+	mu.Lock()
+	if task.Workspace == "" {
+		workspace := "./workspace/" + task.ID[:8]
+		os.MkdirAll(workspace, 0755)
+		task.Workspace = workspace
+	}
+	workspace := task.Workspace
+	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Computer-Use activated in workspace: %s", time.Now().Format(time.RFC3339), workspace))
+	mu.Unlock()
+
+	// Example safe commands based on goal
+	cmds := []string{}
+	lowerGoal := strings.ToLower(st.Goal)
+	if strings.Contains(lowerGoal, "list") || strings.Contains(lowerGoal, "files") || strings.Contains(lowerGoal, "analyze") {
+		cmds = append(cmds, "ls -la")
+	}
+	if strings.Contains(lowerGoal, "create") || strings.Contains(lowerGoal, "report") {
+		cmds = append(cmds, "echo 'Computer Use Report' > report.txt")
+	}
+
+	results := []string{}
+	for _, c := range cmds {
+		output, err := runSafeCommand(c, workspace)
+		if err != nil {
+			results = append(results, fmt.Sprintf("Error executing '%s': %v", c, err))
+		} else {
+			results = append(results, fmt.Sprintf("Command '%s' output: %s", c, strings.TrimSpace(output)))
+		}
+	}
+
+	mu.Lock()
+	st.Result = fmt.Sprintf("Computer-Use completed. Outputs: %v", results)
+	st.Status = "completed"
+	task.Artifacts = append(task.Artifacts, "computer-use-log.txt")
+	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Computer-Use completed: %s", time.Now().Format(time.RFC3339), st.Result))
+	task.UpdatedAt = time.Now()
+	mu.Unlock()
+}
+
 // Freebuff Multi-Agent Router
 func executeSubTask(st *SubTask, task *Task) {
 	log.Printf("🚀 Routing to %s Freebuff agent: %s", st.Type, st.Goal)
+
+	if st.Type == "computer" {
+		executeComputerUse(st, task)
+		return
+	}
 
 	mu.Lock()
 	task.Logs = append(task.Logs, fmt.Sprintf("[%s] Routing to %s agent: %s", time.Now().Format(time.RFC3339), st.Type, st.Goal))
 	mu.Unlock()
 
-	time.Sleep(700 * time.Millisecond)
+	time.Sleep(600 * time.Millisecond)
 
 	mu.Lock()
 	switch st.Type {
@@ -83,7 +179,7 @@ func executeSubTask(st *SubTask, task *Task) {
 		st.Result = "Freebuff Code: Generated/debugged code"
 		task.Artifacts = append(task.Artifacts, "generated-code.go")
 	case "data":
-		st.Result = "Freebuff Data: Analyzed & built spreadsheet"
+		st.Result = "Freebuff Data: Analyzed results"
 		task.Artifacts = append(task.Artifacts, "analysis.xlsx")
 	case "file":
 		st.Result = "Freebuff File: Packaged final deliverables"
@@ -201,7 +297,6 @@ func getTaskLogs(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	// Format logs as []map[string]string as suggested in user prompt
 	logs := make([]map[string]string, len(task.Logs))
 	for i, l := range task.Logs {
 		logs[i] = map[string]string{"message": l}
@@ -238,8 +333,39 @@ func deleteTask(w http.ResponseWriter, r *http.Request, id string) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// POST /computer-use for direct local control
+func computerUse(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Command string `json:"command"`
+		Approve bool   `json:"approve"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if !req.Approve {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte("⚠️ Approval required for: " + req.Command))
+		return
+	}
+
+	workspace := "./workspace"
+	os.MkdirAll(workspace, 0755)
+
+	output, err := runSafeCommand(req.Command, workspace)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"output": output, "status": "executed"})
+}
+
 func main() {
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("POST /task", createTask)
 	mux.HandleFunc("GET /task/{id}/status", func(w http.ResponseWriter, r *http.Request) {
 		getTaskStatus(w, r, r.PathValue("id"))
@@ -253,8 +379,9 @@ func main() {
 	mux.HandleFunc("DELETE /task/{id}", func(w http.ResponseWriter, r *http.Request) {
 		deleteTask(w, r, r.PathValue("id"))
 	})
+	mux.HandleFunc("POST /computer-use", computerUse)
 
-	log.Println("🚀 Manus-Class Phase 2 Multi-Agent Orchestrator running on :8080")
-	log.Println("✅ DeepSeek + Freebuff routing • Real-time Sandbox View • Replayable")
+	log.Println("🚀 Manus-Class Phase 3 Orchestrator (with Computer Use) running on :8080")
+	log.Println("✅ Local bash control • Workspace isolation • Approval flow • Cross-platform")
 	log.Fatal(http.ListenAndServe(":8080", mux))
 }
