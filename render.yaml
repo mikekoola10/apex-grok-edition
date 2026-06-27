@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: apex-grok-edition
+    env: go
+    buildCommand: go build -o apex
+    startCommand: ./apex
+    envVars:
+      - key: GO_VERSION
+        value: 1.23.0
+      - key: ETH_RPC_URL
+        sync: false
+    autoDeploy: true
+    branch: main
