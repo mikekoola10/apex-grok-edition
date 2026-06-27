@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APEX JARVIS - Web3 Command Center</title>
+    <style>
+        :root {
+            --neon-blue: #00f3ff;
+            --deep-space: #0a0b10;
+            --glass: rgba(255, 255, 255, 0.1);
+        }
+
+        body {
+            background-color: var(--deep-space);
+            color: white;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        header {
+            width: 100%;
+            padding: 20px;
+            text-align: center;
+            border-bottom: 1px solid var(--neon-blue);
+            box-shadow: 0 0 15px var(--neon-blue);
+        }
+
+        .container {
+            width: 90%;
+            max-width: 1000px;
+            margin-top: 30px;
+        }
+
+        .voice-interface {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px;
+            background: var(--glass);
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            margin-bottom: 30px;
+        }
+
+        .visualizer {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+            height: 60px;
+            margin-bottom: 20px;
+        }
+
+        .bar {
+            width: 4px;
+            height: 20px;
+            background: var(--neon-blue);
+            border-radius: 2px;
+            animation: pulse 1s infinite ease-in-out;
+        }
+
+        @keyframes pulse {
+            0%, 100% { height: 20px; }
+            50% { height: 50px; }
+        }
+
+        .bar:nth-child(1) { animation-delay: 0.1s; }
+        .bar:nth-child(2) { animation-delay: 0.2s; }
+        .bar:nth-child(3) { animation-delay: 0.3s; }
+        .bar:nth-child(4) { animation-delay: 0.4s; }
+        .bar:nth-child(5) { animation-delay: 0.5s; }
+
+        input[type="text"] {
+            width: 80%;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid var(--neon-blue);
+            color: white;
+            border-radius: 10px;
+            outline: none;
+            font-size: 1.1rem;
+        }
+
+        .controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 15px;
+        }
+
+        button {
+            padding: 12px 25px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: var(--neon-blue);
+            color: black;
+        }
+
+        .btn-nft {
+            background: #ff00ea;
+            color: white;
+            box-shadow: 0 0 10px #ff00ea;
+        }
+
+        button:hover {
+            transform: scale(1.05);
+            filter: brightness(1.2);
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        .card {
+            background: var(--glass);
+            padding: 20px;
+            border-radius: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        h2 {
+            margin-top: 0;
+            color: var(--neon-blue);
+            font-size: 1.2rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        #logs, #history {
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.9rem;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            border-left: 2px solid var(--neon-blue);
+            padding-left: 10px;
+        }
+
+        .tx-entry {
+            margin-bottom: 10px;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 5px;
+        }
+
+        .tx-hash {
+            color: #ff00ea;
+            word-break: break-all;
+            font-size: 0.8rem;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>APEX JARVIS <span style="font-size: 0.8rem; vertical-align: middle; opacity: 0.7;">V2.0 WEB3</span></h1>
+    </header>
+
+    <div class="container">
+        <div class="voice-interface">
+            <div class="visualizer">
+                <div class="bar"></div>
+                <div class="bar"></div>
+                <div class="bar"></div>
+                <div class="bar"></div>
+                <div class="bar"></div>
+            </div>
+            <input type="text" id="goalInput" placeholder="How can I assist you today, sir?">
+            <div class="controls">
+                <button class="btn-primary" onclick="submitTask()">PROCESS GOAL</button>
+                <button class="btn-nft" onclick="deployNFT()">DEPLOY NFT</button>
+            </div>
+        </div>
+
+        <div class="dashboard">
+            <div class="card">
+                <h2>Live Feed</h2>
+                <div id="logs">Waiting for initialization...</div>
+            </div>
+            <div class="card">
+                <h2>Transaction History</h2>
+                <div id="history">No transactions yet.</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentTaskId = null;
+
+        async function submitTask() {
+            const goal = document.getElementById('goalInput').value;
+            if (!goal) return;
+
+            addLog("System", "Initializing task: " + goal);
+            lastLogIndex = 0;
+
+            const response = await fetch('/task', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ goal })
+            });
+
+            const data = await response.json();
+            currentTaskId = data.task_id;
+            pollStatus();
+        }
+
+        async function deployNFT() {
+            const goal = document.getElementById('goalInput').value || "Default NFT Collection";
+            addLog("Web3", "Initiating NFT Deployment...");
+            lastLogIndex = 0;
+
+            const response = await fetch('/deploy-nft', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ goal })
+            });
+
+            const data = await response.json();
+            addLog("Web3", "Transaction sent: " + data.tx);
+            addTransaction(data.tx, goal);
+            currentTaskId = data.task_id;
+            pollStatus();
+        }
+
+        function addLog(agent, message) {
+            const logs = document.getElementById('logs');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<strong>[${agent}]</strong> ${message}`;
+            logs.prepend(entry);
+        }
+
+        function addTransaction(hash, goal) {
+            const history = document.getElementById('history');
+            if (history.innerText === "No transactions yet.") history.innerHTML = "";
+
+            const entry = document.createElement('div');
+            entry.className = 'tx-entry';
+            entry.innerHTML = `
+                <div><strong>${goal}</strong></div>
+                <div class="tx-hash">${hash}</div>
+                <div style="font-size: 0.7rem; opacity: 0.5;">${new Date().toLocaleTimeString()}</div>
+            `;
+            history.prepend(entry);
+        }
+
+        let lastLogIndex = 0;
+        async function pollStatus() {
+            if (!currentTaskId) return;
+
+            const response = await fetch(`/task/${currentTaskId}/status`);
+            const task = await response.json();
+
+            // Only add new logs
+            if (task.logs && task.logs.length > lastLogIndex) {
+                for (let i = lastLogIndex; i < task.logs.length; i++) {
+                    const log = task.logs[i];
+                    addLog(log.agent, log.action + ": " + (log.details || ""));
+                }
+                lastLogIndex = task.logs.length;
+            }
+
+            if (task.status !== 'completed' && task.status !== 'failed' && task.status !== 'stopped') {
+                setTimeout(pollStatus, 2000);
+            } else {
+                addLog("System", "Task " + task.status);
+            }
+        }
+
+        // Initialize dashboard data
+        async function loadDashboard() {
+            const response = await fetch('/dashboard');
+            const data = await response.json();
+            console.log("Dashboard loaded", data);
+
+            // Populate history from existing tasks with TxHash
+            const history = document.getElementById('history');
+            let hasTx = false;
+
+            Object.values(data.tasks).forEach(task => {
+                if (task.tx_hash) {
+                    if (!hasTx) {
+                        history.innerHTML = "";
+                        hasTx = true;
+                    }
+                    addTransaction(task.tx_hash, task.goal);
+                }
+            });
+        }
+
+        loadDashboard();
+    </script>
+</body>
+</html>
