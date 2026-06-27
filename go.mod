@@ -1,4 +1,4 @@
-module apex-grok-edition
+module github.com/mikekoola10/apex-grok-edition
 
 go 1.23.0
 
