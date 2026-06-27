@@ -464,10 +464,15 @@ func main() {
 	mux.HandleFunc("GET /dashboard", getDashboard)
 	mux.HandleFunc("POST /deploy-nft", deployNFTHandler)
 
-	log.Println("🚀 **APEX JARVIS with Full Web3** LIVE on :8080")
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("🚀 **APEX JARVIS with Full Web3** LIVE on :%s", port)
 	log.Println("✅ DeepSeek + Freebuff + Jules + Apex Deployer + APEX Mirror + Web3")
 
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatal(err)
 	}
 }
