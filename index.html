@@ -3,19 +3,168 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>APEX JARVIS</title>
+    <title>APEX JARVIS COMMAND CENTER</title>
     <style>
-        body { font-family: sans-serif; background: #121212; color: #00ff00; padding: 20px; }
-        #logs { border: 1px solid #333; height: 300px; overflow-y: scroll; padding: 10px; background: #000; }
+        :root {
+            --neon-green: #00ff41;
+            --dark-bg: #0a0a0a;
+            --panel-bg: #1a1a1a;
+        }
+        body {
+            font-family: 'Courier New', Courier, monospace;
+            background: var(--dark-bg);
+            color: var(--neon-green);
+            margin: 0;
+            padding: 20px;
+            overflow-x: hidden;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        header {
+            text-align: center;
+            border-bottom: 2px solid var(--neon-green);
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+            text-shadow: 0 0 10px var(--neon-green);
+        }
+        .dashboard {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+        }
+        .panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--neon-green);
+            padding: 15px;
+            box-shadow: inset 0 0 10px rgba(0, 255, 65, 0.2);
+        }
+        #logs {
+            height: 400px;
+            overflow-y: auto;
+            font-size: 0.9em;
+            background: #000;
+            padding: 10px;
+            border: 1px solid #333;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            border-left: 2px solid var(--neon-green);
+            padding-left: 10px;
+        }
+        .log-time { color: #888; margin-right: 10px; }
+        .log-agent { font-weight: bold; color: #fff; }
+        .log-action { color: #00f2ff; }
+
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        input, button {
+            background: #000;
+            border: 1px solid var(--neon-green);
+            color: var(--neon-green);
+            padding: 10px;
+            font-family: inherit;
+        }
+        button {
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        button:hover {
+            background: var(--neon-green);
+            color: #000;
+        }
+        .spiral-container {
+            position: relative;
+            width: 100%;
+            height: 200px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .spiral {
+            width: 100px;
+            height: 100px;
+            border: 2px solid var(--neon-green);
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 2s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body>
-    <h1>APEX JARVIS IS ONLINE</h1>
-    <div id="logs">
-        <p>[SYSTEM] Ready.</p>
+    <div class="container">
+        <header>
+            <h1>APEX JARVIS: COMMAND CENTER</h1>
+            <p>WEB3 COMMANDER // MULTI-AGENT ORCHESTRATOR</p>
+        </header>
+
+        <div class="dashboard">
+            <div class="panel">
+                <h3>LIVE SYSTEM FEED</h3>
+                <div id="logs">
+                    <div class="log-entry">[SYSTEM] Initializing secure connection...</div>
+                </div>
+            </div>
+            <div class="panel">
+                <h3>COMMANDS</h3>
+                <div class="controls">
+                    <input type="text" id="goalInput" placeholder="Enter objective (e.g. 'research nft')">
+                    <button onclick="createTask()">EXECUTE TASK</button>
+                    <button onclick="deployNFT()">DEPLOY NFT CONTRACT</button>
+                    <div class="spiral-container">
+                        <div class="spiral"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
+
     <script>
-        console.log("Apex JARVIS Frontend Loaded");
+        const logsDiv = document.getElementById('logs');
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const socket = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+
+        socket.onopen = () => {
+            addLog({agent: 'SYSTEM', action: 'CONNECTED', details: 'WebSocket established'});
+        };
+
+        socket.onmessage = (event) => {
+            const log = JSON.parse(event.data);
+            addLog(log);
+        };
+
+        function addLog(log) {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            const time = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-agent">${log.agent}</span>: <span class="log-action">${log.action}</span> ${log.details || ''}`;
+            logsDiv.appendChild(entry);
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+        }
+
+        async function createTask() {
+            const goal = document.getElementById('goalInput').value;
+            const res = await fetch('/task', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({goal})
+            });
+            const data = await res.json();
+            addLog({agent: 'USER', action: 'TASK_CREATED', details: `ID: ${data.task_id}`});
+        }
+
+        async function deployNFT() {
+            const res = await fetch('/deploy-nft', { method: 'POST' });
+            const data = await res.json();
+            addLog({agent: 'WEB3', action: 'NFT_DEPLOYED', details: `Tx: ${data.tx_hash}`});
+        }
     </script>
 </body>
 </html>

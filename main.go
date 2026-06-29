@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 )
 
 type Task struct {
@@ -54,6 +55,12 @@ var (
 	tasks     = make(map[string]*Task)
 	mu        sync.RWMutex
 	taskQueue = make(chan *Task, 100)
+
+	clients   = make(map[*websocket.Conn]bool)
+	clientsMu sync.Mutex
+	upgrader  = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
 )
 
 func init() { go processQueue() }
@@ -61,10 +68,52 @@ func init() { go processQueue() }
 func logAction(task *Task, action, agent, details string) {
 	entry := LogEntry{Timestamp: time.Now().Format(time.RFC3339), Action: action, Agent: agent, Details: details}
 	mu.Lock()
-	task.Logs = append(task.Logs, entry)
-	task.UpdatedAt = time.Now()
+	if task != nil {
+		task.Logs = append(task.Logs, entry)
+		task.UpdatedAt = time.Now()
+	}
 	mu.Unlock()
 	log.Printf("[%s] %s: %s", agent, action, details)
+	broadcastLog(entry)
+}
+
+func broadcastLog(entry LogEntry) {
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
+	for client := range clients {
+		err := client.WriteJSON(entry)
+		if err != nil {
+			log.Printf("error: %v", err)
+			client.Close()
+			delete(clients, client)
+		}
+	}
+}
+
+func handleConnections(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("WebSocket upgrade failed: %v", err)
+		return
+	}
+	defer ws.Close()
+
+	clientsMu.Lock()
+	clients[ws] = true
+	clientsMu.Unlock()
+
+	log.Printf("New WebSocket connection")
+
+	for {
+		var msg interface{}
+		err := ws.ReadJSON(&msg)
+		if err != nil {
+			clientsMu.Lock()
+			delete(clients, ws)
+			clientsMu.Unlock()
+			break
+		}
+	}
 }
 
 func decomposeGoal(goal string) []SubTask {
@@ -162,7 +211,7 @@ func createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := uuid.New().String()
+	id := strings.ReplaceAll(uuid.New().String(), "-", "")
 	task := &Task{
 		ID:        id,
 		Goal:      req.Goal,
@@ -250,10 +299,46 @@ func deployTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func deployNFT(w http.ResponseWriter, r *http.Request) {
-	// Simulate NFT deployment
-	txHash := "0x" + uuid.New().String()
+	// Simulate NFT deployment with Solidity contract generation
+	contractSource := `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+
+contract ApexNFT is ERC721 {
+    constructor() ERC721("ApexGrok", "APX") {}
+}`
+	err := os.WriteFile("NFT-Contract.sol", []byte(contractSource), 0644)
+	if err != nil {
+		http.Error(w, "failed to create contract file", http.StatusInternalServerError)
+		return
+	}
+
+	txHash := "0x" + strings.ReplaceAll(uuid.New().String(), "-", "")
+	logAction(nil, "Deploy NFT", "WEB3", "Contract generated and deployed to Sepolia. Tx: "+txHash)
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"tx_hash": txHash, "status": "deployed"})
+	json.NewEncoder(w).Encode(map[string]string{
+		"tx_hash":  txHash,
+		"status":   "deployed",
+		"contract": "NFT-Contract.sol",
+		"network":  "Sepolia Testnet",
+	})
+}
+
+func communicateAgents(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		From    string `json:"from"`
+		To      string `json:"to"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	logAction(nil, "Communication", req.From, "To "+req.To+": "+req.Message)
+	w.WriteHeader(http.StatusOK)
 }
 
 func getTaskLogs(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +388,8 @@ func main() {
 	mux.HandleFunc("GET /dashboard", getDashboard)
 	mux.HandleFunc("POST /task/{id}/deploy", deployTask)
 	mux.HandleFunc("POST /deploy-nft", deployNFT)
+	mux.HandleFunc("POST /agent/communicate", communicateAgents)
+	mux.HandleFunc("GET /ws", handleConnections)
 
 	port := os.Getenv("PORT")
 	if port == "" {

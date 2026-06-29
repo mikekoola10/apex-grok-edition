@@ -1,0 +1,18 @@
+name: Cross-Repo Sync
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Notify Sync
+        run: |
+          echo "Initiating synchronization with Spiral-ai-agent and koola-10-ai-agent..."
+          # In a real scenario, this would trigger other workflows or push to other repos
+          echo "Sync status: PENDING"
