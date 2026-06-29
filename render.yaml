@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: apex-grok-edition
+    env: go
+    buildCommand: go build -o apex
+    startCommand: ./apex
+    envVars:
+      - key: PORT
+        value: 8080

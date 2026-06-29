@@ -2,9 +2,9 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -94,16 +94,43 @@ func executeTaskAsync(task *Task) {
 		wg.Add(1)
 		go func(st *SubTask) {
 			defer wg.Done()
+
+			// Check if stopped before starting
+			mu.RLock()
+			if task.Status == "stopped" {
+				mu.RUnlock()
+				return
+			}
+			mu.RUnlock()
+
 			time.Sleep(700 * time.Millisecond)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if task.Status == "stopped" {
+				return
+			}
 			st.Status = "completed"
 			st.Result = st.Type + " completed"
 			task.Artifacts = append(task.Artifacts, st.Type+"-result")
+
+			// Update progress
+			completedCount := 0
+			for _, s := range task.SubTasks {
+				if s.Status == "completed" {
+					completedCount++
+				}
+			}
+			task.Progress = (completedCount * 100) / len(task.SubTasks)
 		}(&task.SubTasks[i])
 	}
 	wg.Wait()
+
 	mu.Lock()
-	task.Status = "completed"
-	task.Progress = 100
+	if task.Status != "stopped" {
+		task.Status = "completed"
+		task.Progress = 100
+	}
 	mu.Unlock()
 	logAction(task, "Completed", "JARVIS", "")
 }
@@ -112,27 +139,153 @@ func deployArtifacts(task *Task) {
 	mu.Lock()
 	defer mu.Unlock()
 	for _, a := range task.Artifacts {
-		dep := Deployment{ID: uuid.New().String(), Artifact: a, Target: "vercel", URL: "https://apex-" + task.ID[:6] + ".app", Status: "deployed", Timestamp: time.Now()}
+		dep := Deployment{
+			ID:        uuid.New().String(),
+			Artifact:  a,
+			Target:    "vercel",
+			URL:       "https://apex-" + task.ID[:6] + ".app",
+			Status:    "deployed",
+			Timestamp: time.Now(),
+		}
 		task.Deployments = append(task.Deployments, dep)
 	}
 }
 
 func createTask(w http.ResponseWriter, r *http.Request) {
 	var req struct{ Goal string `json:"goal"` }
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
 	if req.Goal == "" {
 		http.Error(w, "goal required", http.StatusBadRequest)
 		return
 	}
 
 	id := uuid.New().String()
-	task := &Task{ID: id, Goal: req.Goal, Status: "queued", SubTasks: decomposeGoal(req.Goal), CreatedAt: time.Now(), SandboxID: createSandbox(id), Logs: []LogEntry{}}
+	task := &Task{
+		ID:        id,
+		Goal:      req.Goal,
+		Status:    "queued",
+		SubTasks:  decomposeGoal(req.Goal),
+		CreatedAt: time.Now(),
+		SandboxID: createSandbox(id),
+		Logs:      []LogEntry{},
+	}
 	mu.Lock()
 	tasks[id] = task
 	mu.Unlock()
 	taskQueue <- task
 
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"task_id": id, "status": "queued"})
+}
+
+func getTaskStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	mu.RLock()
+	t, ok := tasks[id]
+	if !ok {
+		mu.RUnlock()
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	// Deep copy to prevent data races during JSON encoding
+	copyTask := *t
+	copyTask.Logs = make([]LogEntry, len(t.Logs))
+	copy(copyTask.Logs, t.Logs)
+	copyTask.Artifacts = make([]string, len(t.Artifacts))
+	copy(copyTask.Artifacts, t.Artifacts)
+	copyTask.SubTasks = make([]SubTask, len(t.SubTasks))
+	copy(copyTask.SubTasks, t.SubTasks)
+	mu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(copyTask)
+}
+
+func stopTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	mu.Lock()
+	t, ok := tasks[id]
+	if ok {
+		t.Status = "stopped"
+	}
+	mu.Unlock()
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func getDashboard(w http.ResponseWriter, r *http.Request) {
+	mu.RLock()
+	defer mu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(tasks)
+}
+
+func deployTask(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	mu.Lock()
+	t, ok := tasks[id]
+	if !ok {
+		mu.Unlock()
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	mu.Unlock()
+
+	deployArtifacts(t)
+
+	mu.RLock()
+	defer mu.RUnlock()
+	// Deep copy deployments
+	deps := make([]Deployment, len(t.Deployments))
+	copy(deps, t.Deployments)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(deps)
+}
+
+func deployNFT(w http.ResponseWriter, r *http.Request) {
+	// Simulate NFT deployment
+	txHash := "0x" + uuid.New().String()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"tx_hash": txHash, "status": "deployed"})
+}
+
+func getTaskLogs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	mu.RLock()
+	t, ok := tasks[id]
+	if !ok {
+		mu.RUnlock()
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	logs := make([]LogEntry, len(t.Logs))
+	copy(logs, t.Logs)
+	mu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(logs)
+}
+
+func getTaskOutput(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	mu.RLock()
+	t, ok := tasks[id]
+	if !ok {
+		mu.RUnlock()
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	artifacts := make([]string, len(t.Artifacts))
+	copy(artifacts, t.Artifacts)
+	mu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(artifacts)
 }
 
 func main() {
@@ -143,18 +296,19 @@ func main() {
 	})
 
 	mux.HandleFunc("POST /task", createTask)
-	mux.HandleFunc("GET /task/{id}/status", func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		mu.RLock()
-		t, ok := tasks[id]
-		mu.RUnlock()
-		if !ok {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		json.NewEncoder(w).Encode(t)
-	})
+	mux.HandleFunc("GET /task/{id}/status", getTaskStatus)
+	mux.HandleFunc("GET /task/{id}/output", getTaskOutput)
+	mux.HandleFunc("GET /task/{id}/logs", getTaskLogs)
+	mux.HandleFunc("POST /task/{id}/stop", stopTask)
+	mux.HandleFunc("GET /dashboard", getDashboard)
+	mux.HandleFunc("POST /task/{id}/deploy", deployTask)
+	mux.HandleFunc("POST /deploy-nft", deployNFT)
 
-	log.Println("🚀 APEX JARVIS IS ONLINE — http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("🚀 APEX JARVIS IS ONLINE — http://localhost:%s", port)
+	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
