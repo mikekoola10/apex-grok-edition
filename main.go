@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -10,8 +11,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 )
 
+// Task models
 type Task struct {
 	ID          string       `json:"id"`
 	Goal        string       `json:"goal"`
@@ -50,13 +53,23 @@ type LogEntry struct {
 	Details   string `json:"details,omitempty"`
 }
 
+// Global state
 var (
 	tasks     = make(map[string]*Task)
 	mu        sync.RWMutex
 	taskQueue = make(chan *Task, 100)
+	upgrader  = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+	clients   = make(map[*websocket.Conn]bool)
+	broadcast = make(chan interface{}, 100)
+	clientsMu sync.Mutex
 )
 
-func init() { go processQueue() }
+func init() {
+	go processQueue()
+	go handleBroadcasts()
+}
 
 func logAction(task *Task, action, agent, details string) {
 	entry := LogEntry{Timestamp: time.Now().Format(time.RFC3339), Action: action, Agent: agent, Details: details}
@@ -64,11 +77,30 @@ func logAction(task *Task, action, agent, details string) {
 	task.Logs = append(task.Logs, entry)
 	task.UpdatedAt = time.Now()
 	mu.Unlock()
+
+	// Broadcast to WebSocket clients
+	broadcast <- map[string]interface{}{
+		"type":    "log",
+		"task_id": task.ID,
+		"log":     entry,
+	}
+	log.Printf("[%s] %s: %s", agent, action, details)
+}
+
+func logActionLocked(task *Task, action, agent, details string) {
+	entry := LogEntry{Timestamp: time.Now().Format(time.RFC3339), Action: action, Agent: agent, Details: details}
+	task.Logs = append(task.Logs, entry)
+	task.UpdatedAt = time.Now()
+
+	broadcast <- map[string]interface{}{
+		"type":    "log",
+		"task_id": task.ID,
+		"log":     entry,
+	}
 	log.Printf("[%s] %s: %s", agent, action, details)
 }
 
 func decomposeGoal(goal string) []SubTask {
-	log.Printf("🤖 DeepSeek: %s", goal)
 	if strings.Contains(strings.ToLower(goal), "research") || strings.Contains(strings.ToLower(goal), "nft") {
 		return []SubTask{
 			{ID: uuid.New().String(), Type: "browser", Goal: "Research", Status: "pending"},
@@ -79,7 +111,7 @@ func decomposeGoal(goal string) []SubTask {
 	return []SubTask{{ID: uuid.New().String(), Type: "file", Goal: "Process", Status: "pending"}}
 }
 
-func createSandbox(id string) string { return "sandbox-" + id[:8] }
+func createSandbox(id string) string { return "sandbox-" + strings.ReplaceAll(id, "-", "")[:8] }
 
 func processQueue() {
 	for t := range taskQueue {
@@ -88,14 +120,12 @@ func processQueue() {
 }
 
 func executeTaskAsync(task *Task) {
-	logAction(task, "Started", "JARVIS", "")
+	logAction(task, "Started", "JARVIS", "Initializing autonomous routines...")
 	var wg sync.WaitGroup
 	for i := range task.SubTasks {
 		wg.Add(1)
 		go func(st *SubTask) {
 			defer wg.Done()
-
-			// Check if stopped before starting
 			mu.RLock()
 			if task.Status == "stopped" {
 				mu.RUnlock()
@@ -103,7 +133,7 @@ func executeTaskAsync(task *Task) {
 			}
 			mu.RUnlock()
 
-			time.Sleep(700 * time.Millisecond)
+			time.Sleep(1500 * time.Millisecond)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -111,10 +141,9 @@ func executeTaskAsync(task *Task) {
 				return
 			}
 			st.Status = "completed"
-			st.Result = st.Type + " completed"
-			task.Artifacts = append(task.Artifacts, st.Type+"-result")
+			st.Result = st.Type + " task finished successfully"
+			task.Artifacts = append(task.Artifacts, st.Type+"-artifact-"+uuid.New().String()[:4])
 
-			// Update progress
 			completedCount := 0
 			for _, s := range task.SubTasks {
 				if s.Status == "completed" {
@@ -122,6 +151,14 @@ func executeTaskAsync(task *Task) {
 				}
 			}
 			task.Progress = (completedCount * 100) / len(task.SubTasks)
+			logActionLocked(task, "SubTask Complete", "AGENT-"+strings.ToUpper(st.Type), st.Goal)
+
+			broadcast <- map[string]interface{}{
+				"type":     "task_update",
+				"task_id":  task.ID,
+				"progress": task.Progress,
+				"status":   task.Status,
+			}
 		}(&task.SubTasks[i])
 	}
 	wg.Wait()
@@ -130,25 +167,45 @@ func executeTaskAsync(task *Task) {
 	if task.Status != "stopped" {
 		task.Status = "completed"
 		task.Progress = 100
+		logActionLocked(task, "Finalized", "JARVIS", "Goal achieved.")
 	}
 	mu.Unlock()
-	logAction(task, "Completed", "JARVIS", "")
+
+	broadcast <- map[string]interface{}{
+		"type":     "task_update",
+		"task_id":  task.ID,
+		"progress": task.Progress,
+		"status":   task.Status,
+	}
 }
 
-func deployArtifacts(task *Task) {
-	mu.Lock()
-	defer mu.Unlock()
-	for _, a := range task.Artifacts {
-		dep := Deployment{
-			ID:        uuid.New().String(),
-			Artifact:  a,
-			Target:    "vercel",
-			URL:       "https://apex-" + task.ID[:6] + ".app",
-			Status:    "deployed",
-			Timestamp: time.Now(),
+func handleBroadcasts() {
+	for msg := range broadcast {
+		clientsMu.Lock()
+		for client := range clients {
+			client.SetWriteDeadline(time.Now().Add(time.Second * 5))
+			err := client.WriteJSON(msg)
+			if err != nil {
+				log.Printf("WebSocket error: %v", err)
+				client.Close()
+				delete(clients, client)
+			}
 		}
-		task.Deployments = append(task.Deployments, dep)
+		clientsMu.Unlock()
 	}
+}
+
+// Handlers
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("WS Upgrade error: %v", err)
+		return
+	}
+	clientsMu.Lock()
+	clients[conn] = true
+	clientsMu.Unlock()
+	log.Printf("New WebSocket connection established")
 }
 
 func createTask(w http.ResponseWriter, r *http.Request) {
@@ -157,16 +214,11 @@ func createTask(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	if req.Goal == "" {
-		http.Error(w, "goal required", http.StatusBadRequest)
-		return
-	}
-
-	id := uuid.New().String()
+	id := strings.ReplaceAll(uuid.New().String(), "-", "")
 	task := &Task{
 		ID:        id,
 		Goal:      req.Goal,
-		Status:    "queued",
+		Status:    "running",
 		SubTasks:  decomposeGoal(req.Goal),
 		CreatedAt: time.Now(),
 		SandboxID: createSandbox(id),
@@ -178,7 +230,7 @@ func createTask(w http.ResponseWriter, r *http.Request) {
 	taskQueue <- task
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"task_id": id, "status": "queued"})
+	json.NewEncoder(w).Encode(map[string]string{"task_id": id})
 }
 
 func getTaskStatus(w http.ResponseWriter, r *http.Request) {
@@ -191,14 +243,14 @@ func getTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Deep copy to prevent data races during JSON encoding
+	// Deep copy to avoid data races during JSON encoding
 	copyTask := *t
 	copyTask.Logs = make([]LogEntry, len(t.Logs))
 	copy(copyTask.Logs, t.Logs)
-	copyTask.Artifacts = make([]string, len(t.Artifacts))
-	copy(copyTask.Artifacts, t.Artifacts)
 	copyTask.SubTasks = make([]SubTask, len(t.SubTasks))
 	copy(copyTask.SubTasks, t.SubTasks)
+	copyTask.Artifacts = make([]string, len(t.Artifacts))
+	copy(copyTask.Artifacts, t.Artifacts)
 	mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -208,101 +260,588 @@ func getTaskStatus(w http.ResponseWriter, r *http.Request) {
 func stopTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	mu.Lock()
-	t, ok := tasks[id]
-	if ok {
+	if t, ok := tasks[id]; ok {
 		t.Status = "stopped"
+		logActionLocked(t, "Stopped", "USER", "Process terminated by operator.")
 	}
 	mu.Unlock()
-	if !ok {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
 	w.WriteHeader(http.StatusOK)
 }
 
-func getDashboard(w http.ResponseWriter, r *http.Request) {
-	mu.RLock()
-	defer mu.RUnlock()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(tasks)
-}
-
-func deployTask(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	mu.Lock()
-	t, ok := tasks[id]
-	if !ok {
-		mu.Unlock()
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	mu.Unlock()
-
-	deployArtifacts(t)
-
-	mu.RLock()
-	defer mu.RUnlock()
-	// Deep copy deployments
-	deps := make([]Deployment, len(t.Deployments))
-	copy(deps, t.Deployments)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(deps)
-}
-
 func deployNFT(w http.ResponseWriter, r *http.Request) {
-	// Simulate NFT deployment
-	txHash := "0x" + uuid.New().String()
+	txHash := "0x" + strings.ReplaceAll(uuid.New().String(), "-", "")
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"tx_hash": txHash, "status": "deployed"})
+	json.NewEncoder(w).Encode(map[string]string{"tx_hash": txHash, "status": "deployed", "contract": "ApexNFT_ERC721"})
 }
 
-func getTaskLogs(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	mu.RLock()
-	t, ok := tasks[id]
-	if !ok {
-		mu.RUnlock()
-		http.Error(w, "not found", http.StatusNotFound)
-		return
+func communicateAgent(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Message string `json:"message"` }
+	json.NewDecoder(r.Body).Decode(&req)
+	response := "I am processing your request: " + req.Message
+	if strings.Contains(strings.ToLower(req.Message), "hello") {
+		response = "Greetings. I am APEX JARVIS. How may I assist your mission today?"
 	}
-	logs := make([]LogEntry, len(t.Logs))
-	copy(logs, t.Logs)
-	mu.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(logs)
+	json.NewEncoder(w).Encode(map[string]string{"response": response})
 }
 
-func getTaskOutput(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	mu.RLock()
-	t, ok := tasks[id]
-	if !ok {
-		mu.RUnlock()
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	artifacts := make([]string, len(t.Artifacts))
-	copy(artifacts, t.Artifacts)
-	mu.RUnlock()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(artifacts)
-}
+const indexHTML = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APEX JARVIS | Premium AI Interface</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@300;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --neon-cyan: #00f3ff;
+            --neon-purple: #bc13fe;
+            --dark-bg: #050505;
+        }
+        body {
+            background-color: var(--dark-bg);
+            color: #e0e0e0;
+            font-family: 'Rajdhani', sans-serif;
+            overflow-x: hidden;
+        }
+        .orbitron { font-family: 'Orbitron', sans-serif; }
+
+        /* Matrix Background */
+        #canvas-bg {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+            opacity: 0.15;
+        }
+
+        /* Animated Eye */
+        .eye-container {
+            position: relative;
+            width: 280px;
+            height: 280px;
+            margin: 0 auto;
+            perspective: 1000px;
+        }
+        .eye-outer {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            border: 2px solid var(--neon-cyan);
+            box-shadow: 0 0 20px var(--neon-cyan), inset 0 0 20px var(--neon-cyan);
+            position: absolute;
+            animation: pulse 4s infinite ease-in-out;
+        }
+        .eye-inner {
+            width: 80%;
+            height: 80%;
+            margin: 10%;
+            border-radius: 50%;
+            border: 1px dashed var(--neon-purple);
+            position: absolute;
+            animation: spin 10s linear infinite;
+        }
+        .eye-core {
+            width: 40%;
+            height: 40%;
+            margin: 30%;
+            background: radial-gradient(circle, var(--neon-cyan) 0%, transparent 70%);
+            border-radius: 50%;
+            position: absolute;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 30px var(--neon-cyan);
+        }
+        .eye-ks {
+            font-size: 2rem;
+            font-weight: bold;
+            color: white;
+            text-shadow: 0 0 10px var(--neon-cyan);
+            animation: spiral-ks 5s infinite linear;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); opacity: 0.8; }
+            50% { transform: scale(1.05); opacity: 1; }
+        }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        @keyframes spiral-ks {
+            0% { transform: rotate(0deg) scale(0.8); }
+            50% { transform: rotate(180deg) scale(1.2); }
+            100% { transform: rotate(360deg) scale(0.8); }
+        }
+
+        .thinking .eye-outer {
+            animation: pulse 0.5s infinite ease-in-out;
+            border-color: var(--neon-purple);
+            box-shadow: 0 0 30px var(--neon-purple);
+        }
+
+        /* Glassmorphism */
+        .glass {
+            background: rgba(15, 15, 15, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(0, 243, 255, 0.2);
+            border-radius: 12px;
+        }
+        .neon-text {
+            color: var(--neon-cyan);
+            text-shadow: 0 0 5px var(--neon-cyan), 0 0 10px var(--neon-cyan);
+        }
+        .neon-border {
+            border: 1px solid var(--neon-cyan);
+            box-shadow: 0 0 10px var(--neon-cyan);
+        }
+
+        /* Waveform */
+        #waveform {
+            width: 100%;
+            height: 60px;
+            background: rgba(0, 243, 255, 0.05);
+            border-radius: 30px;
+        }
+
+        /* Animations */
+        .fade-in { animation: fadeIn 0.8s ease-out forwards; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: #050505; }
+        ::-webkit-scrollbar-thumb { background: var(--neon-cyan); border-radius: 10px; }
+
+        .spiral-mode-active .eye-container {
+            filter: hue-rotate(280deg);
+        }
+        .spiral-mode-active {
+            background: radial-gradient(circle at center, #1a0033 0%, #050505 100%);
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+    <canvas id="canvas-bg"></canvas>
+
+    <div class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8">
+        <!-- Left Sidebar: System Status -->
+        <div class="lg:col-span-3 space-y-6 fade-in" style="animation-delay: 0.1s">
+            <div class="glass p-6">
+                <h2 class="orbitron text-sm font-bold mb-4 neon-text">SYSTEM STATUS</h2>
+                <div class="space-y-4 text-xs">
+                    <div class="flex justify-between items-center">
+                        <span>CPU UTILIZATION</span>
+                        <span class="text-cyan-400">24%</span>
+                    </div>
+                    <div class="w-full bg-gray-800 h-1 rounded-full">
+                        <div class="bg-cyan-500 h-1 rounded-full" style="width: 24%"></div>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span>NEURAL LINK</span>
+                        <span class="text-green-400">STABLE</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span>BLOCKCHAIN SYNC</span>
+                        <span class="text-cyan-400">99.9%</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="glass p-6">
+                <h2 class="orbitron text-sm font-bold mb-4 neon-text">WEB3 PORTAL</h2>
+                <button id="connectWallet" class="w-full py-2 mb-4 rounded border border-cyan-500 text-cyan-500 hover:bg-cyan-500 hover:text-black transition-all duration-300 text-sm font-bold orbitron">
+                    CONNECT WALLET
+                </button>
+                <button id="deployNFT" class="w-full py-2 rounded bg-purple-600 hover:bg-purple-500 text-white transition-all duration-300 text-sm font-bold orbitron hidden">
+                    DEPLOY NFT
+                </button>
+                <div id="walletInfo" class="mt-2 text-center text-xs text-gray-400"></div>
+            </div>
+        </div>
+
+        <!-- Center: JARVIS Core -->
+        <div class="lg:col-span-6 flex flex-col items-center space-y-8 fade-in">
+            <h1 class="orbitron text-4xl md:text-6xl font-bold tracking-widest text-center neon-text mb-4">APEX JARVIS</h1>
+
+            <div class="eye-container" id="jarvis-eye">
+                <div class="eye-outer"></div>
+                <div class="eye-inner"></div>
+                <div class="eye-core">
+                    <div class="eye-ks">K/S</div>
+                </div>
+            </div>
+
+            <div class="w-full max-w-md space-y-6">
+                <div class="relative">
+                    <input type="text" id="userInput" placeholder="COMMAND JARVIS..."
+                        class="w-full bg-transparent border-b-2 border-cyan-900 focus:border-cyan-400 text-cyan-100 p-4 outline-none orbitron text-center text-xl transition-all duration-500">
+                </div>
+
+                <div class="flex justify-center items-center gap-6">
+                    <button id="micBtn" class="w-16 h-16 rounded-full border-2 border-cyan-500 flex items-center justify-center hover:bg-cyan-500/20 transition-all duration-300 relative group">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-cyan-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7-2v4m0 0h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <div class="absolute inset-0 rounded-full bg-cyan-500/20 animate-ping hidden" id="micRipple"></div>
+                    </button>
+
+                    <button id="spiralToggle" class="orbitron text-xs px-4 py-2 border border-purple-500 text-purple-400 rounded hover:bg-purple-500/20 transition-all">
+                        SPIRAL MODE
+                    </button>
+                </div>
+
+                <canvas id="waveform" class="hidden"></canvas>
+
+                <div id="aiResponse" class="text-center text-cyan-300 text-sm italic h-6 opacity-80"></div>
+            </div>
+        </div>
+
+        <!-- Right Sidebar: Live Feed -->
+        <div class="lg:col-span-3 space-y-6 fade-in" style="animation-delay: 0.2s">
+            <div class="glass p-6 h-[500px] flex flex-col">
+                <h2 class="orbitron text-sm font-bold mb-4 neon-text">MISSION LOGS</h2>
+                <div id="logs" class="flex-grow overflow-y-auto space-y-3 text-[10px] uppercase font-mono tracking-tighter">
+                    <div class="text-cyan-800">[SYSTEM] KERNEL LOADED</div>
+                    <div class="text-cyan-800">[SYSTEM] JARVIS PROTOCOLS ACTIVE</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Active Tasks Overlay -->
+    <div id="taskOverlay" class="fixed bottom-8 left-8 right-8 lg:left-auto lg:w-96 glass p-6 translate-y-full transition-transform duration-500 z-50">
+        <div class="flex justify-between items-center mb-4">
+            <h3 class="orbitron text-xs font-bold neon-text">ACTIVE MISSION</h3>
+            <span id="taskProgress" class="text-xs text-cyan-400">0%</span>
+        </div>
+        <div class="w-full bg-gray-800 h-1.5 rounded-full mb-4">
+            <div id="progressBar" class="bg-cyan-500 h-1.5 rounded-full transition-all duration-500" style="width: 0%"></div>
+        </div>
+        <div id="taskGoal" class="text-xs text-gray-400 italic mb-2"></div>
+        <div id="taskStatus" class="text-[10px] text-cyan-600 font-bold">INITIALIZING...</div>
+    </div>
+
+    <script>
+        // Matrix Background
+        const canvas = document.getElementById('canvas-bg');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        const words = "010101 APEX JARVIS KOOLA SPIRAL AI AGENT BLOCKCHAIN NEURAL NET";
+        const drops = [];
+        const fontSize = 14;
+        const columns = canvas.width / fontSize;
+
+        for (let x = 0; x < columns; x++) drops[x] = 1;
+
+        function drawMatrix() {
+            ctx.fillStyle = 'rgba(5, 5, 5, 0.15)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = Math.random() > 0.1 ? '#00f3ff' : '#bc13fe';
+            ctx.font = fontSize + 'px monospace';
+            for (let i = 0; i < drops.length; i++) {
+                const text = words.charAt(Math.floor(Math.random() * words.length));
+                ctx.fillText(text, i * fontSize, drops[i] * fontSize);
+                if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) drops[i] = 0;
+                drops[i]++;
+            }
+        }
+        setInterval(drawMatrix, 50);
+
+        // WebSockets
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(protocol + '//' + window.location.host + '/ws');
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'log') {
+                addLog(data.log.agent, data.log.action, data.log.details);
+            } else if (data.type === 'task_update') {
+                updateTaskUI(data);
+            }
+        };
+
+        function addLog(agent, action, details) {
+            const logs = document.getElementById('logs');
+            const entry = document.createElement('div');
+            entry.className = 'border-l border-cyan-500 pl-2 py-1 fade-in';
+            entry.innerHTML = '<span class="text-cyan-400">[' + agent + ']</span> ' + action + ': <span class="text-gray-500"></span>';
+            logs.appendChild(entry);
+
+            const detailSpan = entry.querySelector('.text-gray-500');
+            let i = 0;
+            const timer = setInterval(() => {
+                if (i < details.length) {
+                    detailSpan.textContent += details.charAt(i);
+                    i++;
+                    logs.scrollTop = logs.scrollHeight;
+                } else {
+                    clearInterval(timer);
+                }
+            }, 15);
+        }
+
+        function updateTaskUI(data) {
+            const overlay = document.getElementById('taskOverlay');
+            overlay.classList.remove('translate-y-full');
+            document.getElementById('taskProgress').innerText = data.progress + '%';
+            document.getElementById('progressBar').style.width = data.progress + '%';
+            document.getElementById('taskStatus').innerText = data.status.toUpperCase();
+
+            if (data.progress === 100) {
+                setTimeout(() => {
+                    overlay.classList.add('translate-y-full');
+                }, 5000);
+            }
+        }
+
+        // Voice Features
+        const micBtn = document.getElementById('micBtn');
+        const micRipple = document.getElementById('micRipple');
+        const aiResponse = document.getElementById('aiResponse');
+        const userInput = document.getElementById('userInput');
+
+        let recognition;
+        if ('webkitSpeechRecognition' in window) {
+            recognition = new webkitSpeechRecognition();
+            recognition.continuous = false;
+            recognition.interimResults = false;
+
+            recognition.onstart = () => {
+                micRipple.classList.remove('hidden');
+                speak("Listening for command.");
+            };
+
+            recognition.onresult = (event) => {
+                const last = event.results.length - 1;
+                const text = event.results[last][0].transcript.toLowerCase().trim();
+
+                if (text.includes('jarvis')) {
+                    playPing();
+                    const command = text.split('jarvis').pop().trim();
+                    if (command) {
+                        userInput.value = command;
+                        executeCommand(command);
+                    } else {
+                        speak("Yes, I am here. What is your command?");
+                    }
+                }
+            };
+
+            recognition.onend = () => {
+                micRipple.classList.add('hidden');
+            };
+        }
+
+        let audioCtx;
+        function initAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        let isJarvisActive = false;
+        micBtn.onclick = () => {
+            initAudio();
+            if (recognition) {
+                if (isJarvisActive) {
+                    recognition.stop();
+                    isJarvisActive = false;
+                    micBtn.classList.remove('animate-pulse');
+                    speak("Jarvis mode deactivated.");
+                } else {
+                    recognition.continuous = true;
+                    recognition.start();
+                    isJarvisActive = true;
+                    micBtn.classList.add('animate-pulse');
+                    speak("Jarvis mode activated. Listening for wake word.");
+                }
+            }
+        };
+
+        function playPing() {
+            try {
+                initAudio();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+                gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.2);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.2);
+                if (window.navigator.vibrate) window.navigator.vibrate(50);
+            } catch(e) {}
+        }
+
+        function speak(text) {
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.pitch = 0.8;
+            utterance.rate = 1;
+            utterance.voice = speechSynthesis.getVoices().find(v => v.name.includes('Google UK English Male')) || null;
+            speechSynthesis.speak(utterance);
+
+            // Typing effect for visual feedback
+            aiResponse.innerText = "";
+            let i = 0;
+            const timer = setInterval(() => {
+                if (i < text.length) {
+                    aiResponse.innerText += text.charAt(i);
+                    i++;
+                } else {
+                    clearInterval(timer);
+                }
+            }, 30);
+        }
+
+        async function executeCommand(goal) {
+            if (!goal) return;
+            playPing();
+            addLog('USER', 'COMMAND', goal);
+            document.getElementById('jarvis-eye').classList.add('thinking');
+
+            const res = await fetch('/task', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({goal})
+            });
+            const data = await res.json();
+            document.getElementById('jarvis-eye').classList.remove('thinking');
+            document.getElementById('taskGoal').innerText = goal;
+            speak("Mission accepted. Orchestrating sub-agents for goal: " + goal);
+        }
+
+        userInput.onkeypress = (e) => {
+            if (e.key === 'Enter') {
+                executeCommand(userInput.value);
+                userInput.value = "";
+            }
+        };
+
+        // Spiral Mode
+        const spiralToggle = document.getElementById('spiralToggle');
+        spiralToggle.onclick = () => {
+            document.body.classList.toggle('spiral-mode-active');
+            const isActive = document.body.classList.contains('spiral-mode-active');
+            spiralToggle.innerText = isActive ? "TERMINATE SPIRAL" : "SPIRAL MODE";
+            speak(isActive ? "Spiral visualization engaged." : "Standard interface restored.");
+        };
+
+        // Web3 Integration
+        const connectBtn = document.getElementById('connectWallet');
+        const deployBtn = document.getElementById('deployNFT');
+        const walletInfo = document.getElementById('walletInfo');
+
+        connectBtn.onclick = async () => {
+            if (window.ethereum) {
+                try {
+                    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+                    walletInfo.innerText = "Connected: " + accounts[0].substring(0, 6) + "..." + accounts[0].substring(38);
+                    connectBtn.classList.add('hidden');
+                    deployBtn.classList.remove('hidden');
+                    speak("Neural wallet link established.");
+                } catch (err) {
+                    speak("Connection failed. Check MetaMask.");
+                }
+            } else {
+                speak("Ethereum provider not detected.");
+            }
+        };
+
+        deployBtn.onclick = async () => {
+            speak("Initiating NFT smart contract deployment on Sepolia. Generating Solidity boilerplate.");
+            deployBtn.disabled = true;
+
+            // Simulated Solidity Contract Generation
+            const contractCode = "// SPDX-License-Identifier: MIT\n" +
+"pragma solidity ^0.8.20;\n" +
+"import \"@openzeppelin/contracts/token/ERC721/ERC721.go\";\n" +
+"contract ApexNFT is ERC721 {\n" +
+"    constructor() ERC721(\"ApexCollection\", \"APX\") {}\n" +
+"}";
+            addLog('JARVIS', 'GENERATED', 'Solidity contract "ApexNFT" created.');
+            console.log(contractCode);
+
+            const res = await fetch('/deploy-nft', { method: 'POST' });
+            const data = await res.json();
+            addLog('WEB3', 'DEPLOYED', 'TX: ' + data.tx_hash);
+            speak("Success. Contract deployed to Sepolia. Transaction hash broadcast to the mesh.");
+            deployBtn.disabled = false;
+        };
+
+        // Waveform Visualizer
+        const wfCanvas = document.getElementById('waveform');
+        const wfCtx = wfCanvas.getContext('2d');
+        function drawWave() {
+            requestAnimationFrame(drawWave);
+            if (micRipple.classList.contains('hidden')) {
+                wfCanvas.classList.add('hidden');
+                return;
+            }
+            wfCanvas.classList.remove('hidden');
+            wfCtx.clearRect(0, 0, wfCanvas.width, wfCanvas.height);
+
+            const time = Date.now() * 0.01;
+            for (let j = 0; j < 3; j++) {
+                wfCtx.strokeStyle = j === 0 ? 'rgba(0, 243, 253, 0.8)' :
+                                   j === 1 ? 'rgba(188, 19, 254, 0.5)' :
+                                             'rgba(0, 243, 253, 0.3)';
+                wfCtx.lineWidth = j === 0 ? 2 : 1;
+                wfCtx.beginPath();
+                for (let i = 0; i < wfCanvas.width; i += 2) {
+                    const shift = j * 2;
+                    const freq = 0.05 + (j * 0.02);
+                    const amp = isJarvisActive ? (20 - (j * 4)) : (5);
+                    const y = wfCanvas.height / 2 + Math.sin(i * freq + time + shift) * amp * (0.8 + Math.random() * 0.4);
+                    if (i === 0) wfCtx.moveTo(i, y);
+                    else wfCtx.lineTo(i, y);
+                }
+                wfCtx.stroke();
+            }
+        }
+        drawWave();
+
+        window.onload = () => {
+            setTimeout(() => {
+                speak("Welcome back. I am APEX JARVIS. Systems at optimal performance.");
+            }, 1000);
+        };
+    </script>
+</body>
+</html>
+`
 
 func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "index.html")
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		fmt.Fprint(w, indexHTML)
 	})
 
+	mux.HandleFunc("GET /ws", wsHandler)
 	mux.HandleFunc("POST /task", createTask)
 	mux.HandleFunc("GET /task/{id}/status", getTaskStatus)
-	mux.HandleFunc("GET /task/{id}/output", getTaskOutput)
-	mux.HandleFunc("GET /task/{id}/logs", getTaskLogs)
 	mux.HandleFunc("POST /task/{id}/stop", stopTask)
-	mux.HandleFunc("GET /dashboard", getDashboard)
-	mux.HandleFunc("POST /task/{id}/deploy", deployTask)
 	mux.HandleFunc("POST /deploy-nft", deployNFT)
+	mux.HandleFunc("POST /agent/communicate", communicateAgent)
+	mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
+		mu.RLock()
+		defer mu.RUnlock()
+		json.NewEncoder(w).Encode(tasks)
+	})
 
 	port := os.Getenv("PORT")
 	if port == "" {
