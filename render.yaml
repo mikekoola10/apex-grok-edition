@@ -1,9 +1,9 @@
 services:
   - type: web
-    name: apex-grok-edition
+    name: apex-jarvis
     env: go
-    buildCommand: go build -o apex
-    startCommand: ./apex
+    buildCommand: go build -tags netgo -ldflags '-s -w' -o app main.go
+    startCommand: ./app
     envVars:
       - key: PORT
         value: 8080
