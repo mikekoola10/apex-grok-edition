@@ -3,19 +3,179 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>APEX JARVIS</title>
+    <title>APEX SPIRAL | KOOLA10 COMMAND</title>
     <style>
-        body { font-family: sans-serif; background: #121212; color: #00ff00; padding: 20px; }
-        #logs { border: 1px solid #333; height: 300px; overflow-y: scroll; padding: 10px; background: #000; }
+        :root {
+            --neon-green: #00ff41;
+            --deep-black: #050505;
+            --neon-blue: #00f2ff;
+            --neon-pink: #ff00ea;
+        }
+        body {
+            background-color: var(--deep-black);
+            color: var(--neon-green);
+            font-family: 'Courier New', Courier, monospace;
+            margin: 0;
+            padding: 20px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #header {
+            border-bottom: 2px solid var(--neon-green);
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            text-shadow: 0 0 10px var(--neon-green);
+        }
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 2fr 1fr;
+            gap: 20px;
+            flex-grow: 1;
+        }
+        .panel {
+            border: 1px solid var(--neon-green);
+            padding: 15px;
+            background: rgba(0, 255, 65, 0.05);
+            box-shadow: inset 0 0 15px rgba(0, 255, 65, 0.1);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        h2 {
+            font-size: 1.2em;
+            border-bottom: 1px solid var(--neon-green);
+            padding-bottom: 5px;
+            margin-top: 0;
+            text-transform: uppercase;
+        }
+        #logs {
+            flex-grow: 1;
+            overflow-y: auto;
+            font-size: 0.8em;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+            border-left: 2px solid var(--neon-blue);
+            padding-left: 5px;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        .stat-box {
+            border: 1px solid var(--neon-blue);
+            padding: 10px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 1.5em;
+            color: var(--neon-blue);
+            display: block;
+        }
+        #jarvis-orb {
+            width: 150px;
+            height: 150px;
+            border-radius: 50%;
+            background: radial-gradient(circle, var(--neon-blue) 0%, transparent 70%);
+            margin: 20px auto;
+            box-shadow: 0 0 30px var(--neon-blue);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 0.8; }
+            50% { transform: scale(1.1); opacity: 1; }
+            100% { transform: scale(1); opacity: 0.8; }
+        }
+        input {
+            background: black;
+            border: 1px solid var(--neon-green);
+            color: var(--neon-green);
+            padding: 10px;
+            width: calc(100% - 22px);
+            margin-top: 10px;
+            font-family: inherit;
+        }
     </style>
 </head>
 <body>
-    <h1>APEX JARVIS IS ONLINE</h1>
-    <div id="logs">
-        <p>[SYSTEM] Ready.</p>
+    <div id="header">
+        <h1>APEX SPIRAL // ORCHESTRATOR v4.0</h1>
+        <div id="status">SYSTEM: ONLINE | SECURE</div>
     </div>
+    <div class="container">
+        <div class="panel">
+            <h2>Store Metrics</h2>
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <span class="stat-label">DAILY SALES</span>
+                    <span class="stat-value" id="stat-sales">$4,205.12</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">ORDERS</span>
+                    <span class="stat-value" id="stat-orders">12</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">INVENTORY</span>
+                    <span class="stat-value" id="stat-inv">842</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">UPTIME</span>
+                    <span class="stat-value">99.9%</span>
+                </div>
+            </div>
+            <div style="margin-top:20px">
+                <h2>Quick Commands</h2>
+                <button onclick="sendCommand('Generate new product')">NEW PRODUCT</button>
+                <button onclick="sendCommand('Show sales')">SALES RPT</button>
+            </div>
+        </div>
+        <div class="panel">
+            <h2>Live Feed</h2>
+            <div id="logs">
+                <div class="log-entry">[SYSTEM] Establishing neural link...</div>
+            </div>
+            <input type="text" id="cmdInput" placeholder="ENTER VOICE COMMAND..." onkeypress="if(event.key==='Enter') sendCommand(this.value)">
+        </div>
+        <div class="panel">
+            <h2>Neural Interface</h2>
+            <div id="jarvis-orb"></div>
+            <p style="text-align:center">JARVIS IS LISTENING</p>
+            <div style="font-size: 0.7em; margin-top: 20px;">
+                AI AGENT STATUS: IDLE<br>
+                DEEPSEEK: CONNECTED<br>
+                HUGGINGFACE: STANDBY<br>
+                SHOPIFY API: ACTIVE
+            </div>
+        </div>
+    </div>
+
     <script>
-        console.log("Apex JARVIS Frontend Loaded");
+        const logsDiv = document.getElementById('logs');
+        const socket = new WebSocket('ws://' + window.location.host + '/ws');
+
+        socket.onmessage = function(event) {
+            const log = JSON.parse(event.data);
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `[${log.timestamp.split('T')[1].split('Z')[0]}] ${log.agent}: ${log.action} - ${log.details || ''}`;
+            logsDiv.prepend(entry);
+        };
+
+        function sendCommand(cmd) {
+            if (!cmd) return;
+            fetch('/api/voice-command', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({command: cmd})
+            });
+            document.getElementById('cmdInput').value = '';
+        }
     </script>
 </body>
 </html>

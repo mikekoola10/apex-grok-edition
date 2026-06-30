@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 )
 
 type Task struct {
@@ -54,9 +55,18 @@ var (
 	tasks     = make(map[string]*Task)
 	mu        sync.RWMutex
 	taskQueue = make(chan *Task, 100)
+	startTime = time.Now()
+	upgrader  = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
+	}
+	clients   = make(map[*websocket.Conn]bool)
+	broadcast = make(chan LogEntry)
 )
 
-func init() { go processQueue() }
+func init() {
+	go processQueue()
+	go handleMessages()
+}
 
 func logAction(task *Task, action, agent, details string) {
 	entry := LogEntry{Timestamp: time.Now().Format(time.RFC3339), Action: action, Agent: agent, Details: details}
@@ -65,11 +75,58 @@ func logAction(task *Task, action, agent, details string) {
 	task.UpdatedAt = time.Now()
 	mu.Unlock()
 	log.Printf("[%s] %s: %s", agent, action, details)
+	broadcast <- entry
+}
+
+func handleMessages() {
+	for {
+		msg := <-broadcast
+		mu.Lock()
+		for client := range clients {
+			err := client.WriteJSON(msg)
+			if err != nil {
+				log.Printf("error: %v", err)
+				client.Close()
+				delete(clients, client)
+			}
+		}
+		mu.Unlock()
+	}
+}
+
+func handleConnections(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer ws.Close()
+
+	mu.Lock()
+	clients[ws] = true
+	mu.Unlock()
+
+	for {
+		_, _, err := ws.ReadMessage()
+		if err != nil {
+			mu.Lock()
+			delete(clients, ws)
+			mu.Unlock()
+			break
+		}
+	}
 }
 
 func decomposeGoal(goal string) []SubTask {
-	log.Printf("🤖 DeepSeek: %s", goal)
-	if strings.Contains(strings.ToLower(goal), "research") || strings.Contains(strings.ToLower(goal), "nft") {
+	log.Printf("🤖 DeepSeek Decomposing: %s", goal)
+	g := strings.ToLower(goal)
+	if strings.Contains(g, "product") || strings.Contains(g, "collection") || strings.Contains(g, "hoodie") {
+		return []SubTask{
+			{ID: uuid.New().String(), Type: "ai", Goal: "Generate Strategy & Description", Status: "pending"},
+			{ID: uuid.New().String(), Type: "ai", Goal: "Generate Product Images", Status: "pending"},
+			{ID: uuid.New().String(), Type: "shopify", Goal: "Upload to Shopify Store", Status: "pending"},
+		}
+	}
+	if strings.Contains(g, "research") || strings.Contains(g, "nft") {
 		return []SubTask{
 			{ID: uuid.New().String(), Type: "browser", Goal: "Research", Status: "pending"},
 			{ID: uuid.New().String(), Type: "data", Goal: "Analyze", Status: "pending"},
@@ -89,42 +146,56 @@ func processQueue() {
 
 func executeTaskAsync(task *Task) {
 	logAction(task, "Started", "JARVIS", "")
-	var wg sync.WaitGroup
+	ai := NewAIService()
+	shopify := NewShopifyClient()
+
+	var productTitle, productDesc, productImage string
+
 	for i := range task.SubTasks {
-		wg.Add(1)
-		go func(st *SubTask) {
-			defer wg.Done()
+		st := &task.SubTasks[i]
 
-			// Check if stopped before starting
-			mu.RLock()
-			if task.Status == "stopped" {
-				mu.RUnlock()
-				return
-			}
+		// Check if stopped
+		mu.RLock()
+		if task.Status == "stopped" {
 			mu.RUnlock()
+			return
+		}
+		mu.RUnlock()
 
-			time.Sleep(700 * time.Millisecond)
+		logAction(task, "Executing", "AGENT", st.Goal)
 
-			mu.Lock()
-			defer mu.Unlock()
-			if task.Status == "stopped" {
-				return
+		switch st.Type {
+		case "ai":
+			if strings.Contains(st.Goal, "Description") {
+				title, desc, _ := ai.GenerateProductDescription(task.Goal)
+				productTitle = title
+				productDesc = desc
+				st.Result = "AI generated description"
+			} else {
+				img, _ := ai.GenerateProductImage(task.Goal)
+				productImage = img
+				st.Result = "AI generated image"
 			}
-			st.Status = "completed"
+		case "shopify":
+			res, _ := shopify.CreateProduct(productTitle, productDesc, productImage)
+			st.Result = res
+		default:
+			time.Sleep(500 * time.Millisecond)
 			st.Result = st.Type + " completed"
-			task.Artifacts = append(task.Artifacts, st.Type+"-result")
+		}
 
-			// Update progress
-			completedCount := 0
-			for _, s := range task.SubTasks {
-				if s.Status == "completed" {
-					completedCount++
-				}
+		mu.Lock()
+		st.Status = "completed"
+		task.Artifacts = append(task.Artifacts, st.Result)
+		completedCount := 0
+		for _, s := range task.SubTasks {
+			if s.Status == "completed" {
+				completedCount++
 			}
-			task.Progress = (completedCount * 100) / len(task.SubTasks)
-		}(&task.SubTasks[i])
+		}
+		task.Progress = (completedCount * 100) / len(task.SubTasks)
+		mu.Unlock()
 	}
-	wg.Wait()
 
 	mu.Lock()
 	if task.Status != "stopped" {
@@ -288,6 +359,68 @@ func getTaskOutput(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(artifacts)
 }
 
+func voiceCommand(w http.ResponseWriter, r *http.Request) {
+	var req struct{ Command string `json:"command"` }
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("Error decoding voice command: %v", err)
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	cmd := strings.ToLower(req.Command)
+	var goal string
+	if strings.Contains(cmd, "product") || strings.Contains(cmd, "hoodie") {
+		goal = "Create new product: " + req.Command
+	} else if strings.Contains(cmd, "sales") || strings.Contains(cmd, "orders") {
+		goal = "Fetch store sales and orders"
+	} else {
+		goal = req.Command
+	}
+
+	id := uuid.New().String()
+	task := &Task{
+		ID:        id,
+		Goal:      goal,
+		Status:    "queued",
+		SubTasks:  decomposeGoal(goal),
+		CreatedAt: time.Now(),
+		Logs:      []LogEntry{},
+	}
+	mu.Lock()
+	tasks[id] = task
+	mu.Unlock()
+	taskQueue <- task
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"task_id": id, "intent": goal})
+}
+
+func getSystemMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Admin-Key") != config.AdminKey {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	mu.RLock()
+	totalTasks := len(tasks)
+	activeTasks := 0
+	for _, t := range tasks {
+		if t.Status == "queued" || t.Status == "executing" {
+			activeTasks++
+		}
+	}
+	mu.RUnlock()
+
+	metrics := map[string]interface{}{
+		"total_tasks":  totalTasks,
+		"active_tasks": activeTasks,
+		"status":      "online",
+		"uptime":      time.Since(startTime).String(),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metrics)
+}
+
 func main() {
 	mux := http.NewServeMux()
 
@@ -303,6 +436,9 @@ func main() {
 	mux.HandleFunc("GET /dashboard", getDashboard)
 	mux.HandleFunc("POST /task/{id}/deploy", deployTask)
 	mux.HandleFunc("POST /deploy-nft", deployNFT)
+	mux.HandleFunc("POST /api/voice-command", voiceCommand)
+	mux.HandleFunc("GET /api/admin/system", getSystemMetrics)
+	mux.HandleFunc("GET /ws", handleConnections)
 
 	port := os.Getenv("PORT")
 	if port == "" {
