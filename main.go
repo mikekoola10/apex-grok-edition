@@ -136,8 +136,8 @@ func executeTaskAsync(task *Task) {
 			time.Sleep(1500 * time.Millisecond)
 
 			mu.Lock()
-			defer mu.Unlock()
 			if task.Status == "stopped" {
+				mu.Unlock()
 				return
 			}
 			st.Status = "completed"
@@ -153,11 +153,14 @@ func executeTaskAsync(task *Task) {
 			task.Progress = (completedCount * 100) / len(task.SubTasks)
 			logActionLocked(task, "SubTask Complete", "AGENT-"+strings.ToUpper(st.Type), st.Goal)
 
+			prog, status := task.Progress, task.Status
+			mu.Unlock()
+
 			broadcast <- map[string]interface{}{
 				"type":     "task_update",
 				"task_id":  task.ID,
-				"progress": task.Progress,
-				"status":   task.Status,
+				"progress": prog,
+				"status":   status,
 			}
 		}(&task.SubTasks[i])
 	}
@@ -169,13 +172,14 @@ func executeTaskAsync(task *Task) {
 		task.Progress = 100
 		logActionLocked(task, "Finalized", "JARVIS", "Goal achieved.")
 	}
+	prog, status := task.Progress, task.Status
 	mu.Unlock()
 
 	broadcast <- map[string]interface{}{
 		"type":     "task_update",
 		"task_id":  task.ID,
-		"progress": task.Progress,
-		"status":   task.Status,
+		"progress": prog,
+		"status":   status,
 	}
 }
 
@@ -293,6 +297,8 @@ const indexHTML = `
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>APEX JARVIS | Premium AI Interface</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/vanilla-tilt@1.8.1/dist/vanilla-tilt.min.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Rajdhani:wght@300;500;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -387,10 +393,16 @@ const indexHTML = `
 
         /* Glassmorphism */
         .glass {
-            background: rgba(15, 15, 15, 0.7);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(0, 243, 255, 0.2);
-            border-radius: 12px;
+            background: rgba(15, 15, 15, 0.4);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(0, 243, 255, 0.1);
+            border-radius: 16px;
+            box-shadow: inset 0 0 15px rgba(0, 243, 255, 0.05), 0 10px 30px rgba(0, 0, 0, 0.5);
+            transition: all 0.3s ease;
+        }
+        .glass:hover {
+            border: 1px solid rgba(0, 243, 255, 0.3);
+            box-shadow: inset 0 0 20px rgba(0, 243, 255, 0.1), 0 15px 40px rgba(0, 0, 0, 0.7);
         }
         .neon-text {
             color: var(--neon-cyan);
@@ -427,15 +439,30 @@ const indexHTML = `
         .spiral-mode-active {
             background: radial-gradient(circle at center, #1a0033 0%, #050505 100%);
         }
+        #spiral-canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 0;
+            opacity: 0;
+            transition: opacity 1s ease;
+        }
+        .spiral-mode-active #spiral-canvas {
+            opacity: 1;
+        }
     </style>
 </head>
 <body class="p-4 md:p-8">
     <canvas id="canvas-bg"></canvas>
+    <canvas id="spiral-canvas"></canvas>
 
-    <div class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8">
+    <div class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8 relative z-10">
         <!-- Left Sidebar: System Status -->
         <div class="lg:col-span-3 space-y-6 fade-in" style="animation-delay: 0.1s">
-            <div class="glass p-6">
+            <div class="glass p-6" data-tilt data-tilt-max="5" data-tilt-glare data-tilt-max-glare="0.1">
                 <h2 class="orbitron text-sm font-bold mb-4 neon-text">SYSTEM STATUS</h2>
                 <div class="space-y-4 text-xs">
                     <div class="flex justify-between items-center">
@@ -453,10 +480,17 @@ const indexHTML = `
                         <span>BLOCKCHAIN SYNC</span>
                         <span class="text-cyan-400">99.9%</span>
                     </div>
+                    <hr class="border-gray-800 my-2">
+                    <div class="flex justify-between items-center">
+                        <span>DAILY STREAK</span>
+                        <span class="text-orange-500 font-bold flex items-center gap-1">
+                            <span class="animate-bounce">🔥</span> <span id="streakCounter">0</span>
+                        </span>
+                    </div>
                 </div>
             </div>
 
-            <div class="glass p-6">
+            <div class="glass p-6" data-tilt data-tilt-max="5" data-tilt-glare data-tilt-max-glare="0.1">
                 <h2 class="orbitron text-sm font-bold mb-4 neon-text">WEB3 PORTAL</h2>
                 <button id="connectWallet" class="w-full py-2 mb-4 rounded border border-cyan-500 text-cyan-500 hover:bg-cyan-500 hover:text-black transition-all duration-300 text-sm font-bold orbitron">
                     CONNECT WALLET
@@ -473,9 +507,9 @@ const indexHTML = `
             <h1 class="orbitron text-4xl md:text-6xl font-bold tracking-widest text-center neon-text mb-4">APEX JARVIS</h1>
 
             <div class="eye-container" id="jarvis-eye">
-                <div class="eye-outer"></div>
-                <div class="eye-inner"></div>
-                <div class="eye-core">
+                <div id="three-container" class="absolute inset-0"></div>
+                <div class="eye-outer pointer-events-none"></div>
+                <div class="eye-core pointer-events-none">
                     <div class="eye-ks">K/S</div>
                 </div>
             </div>
@@ -497,6 +531,9 @@ const indexHTML = `
                     <button id="spiralToggle" class="orbitron text-xs px-4 py-2 border border-purple-500 text-purple-400 rounded hover:bg-purple-500/20 transition-all">
                         SPIRAL MODE
                     </button>
+                    <button id="ambientToggle" class="orbitron text-xs px-4 py-2 border border-cyan-500 text-cyan-400 rounded hover:bg-cyan-500/20 transition-all">
+                        AMBIENT: OFF
+                    </button>
                 </div>
 
                 <canvas id="waveform" class="hidden"></canvas>
@@ -507,12 +544,23 @@ const indexHTML = `
 
         <!-- Right Sidebar: Live Feed -->
         <div class="lg:col-span-3 space-y-6 fade-in" style="animation-delay: 0.2s">
-            <div class="glass p-6 h-[500px] flex flex-col">
+            <div class="glass p-6 h-[500px] flex flex-col" data-tilt data-tilt-max="3" data-tilt-glare data-tilt-max-glare="0.1">
                 <h2 class="orbitron text-sm font-bold mb-4 neon-text">MISSION LOGS</h2>
                 <div id="logs" class="flex-grow overflow-y-auto space-y-3 text-[10px] uppercase font-mono tracking-tighter">
                     <div class="text-cyan-800">[SYSTEM] KERNEL LOADED</div>
                     <div class="text-cyan-800">[SYSTEM] JARVIS PROTOCOLS ACTIVE</div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Achievement Popup -->
+    <div id="achievementPopup" class="fixed top-12 left-1/2 transform -translate-x-1/2 glass p-4 z-[100] border-orange-500 border-2 translate-y-[-200%] transition-transform duration-700">
+        <div class="flex items-center gap-4">
+            <div class="text-4xl">🏆</div>
+            <div>
+                <h4 class="orbitron text-orange-500 font-bold text-sm">ACHIEVEMENT UNLOCKED</h4>
+                <p id="achievementDesc" class="text-xs text-gray-300"></p>
             </div>
         </div>
     </div>
@@ -557,6 +605,56 @@ const indexHTML = `
             }
         }
         setInterval(drawMatrix, 50);
+
+        // Three.js Holographic Orb
+        const threeContainer = document.getElementById('three-container');
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, 1, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        renderer.setSize(280, 280);
+        threeContainer.appendChild(renderer.domElement);
+
+        const orbGroup = new THREE.Group();
+        scene.add(orbGroup);
+
+        // Core Sphere
+        const coreGeo = new THREE.IcosahedronGeometry(1.2, 2);
+        const coreMat = new THREE.MeshBasicMaterial({ color: 0x00f3ff, wireframe: true, transparent: true, opacity: 0.3 });
+        const coreMesh = new THREE.Mesh(coreGeo, coreMat);
+        orbGroup.add(coreMesh);
+
+        // Particles
+        const partCount = 500;
+        const partGeo = new THREE.BufferGeometry();
+        const partPos = new Float32Array(partCount * 3);
+        for(let i=0; i<partCount*3; i++) partPos[i] = (Math.random() - 0.5) * 4;
+        partGeo.setAttribute('position', new THREE.BufferAttribute(partPos, 3));
+        const partMat = new THREE.PointsMaterial({ color: 0xbc13fe, size: 0.05, transparent: true, opacity: 0.8 });
+        const particles = new THREE.Points(partGeo, partMat);
+        orbGroup.add(particles);
+
+        // Rings
+        const ringMat = new THREE.MeshBasicMaterial({ color: 0x00f3ff, side: THREE.DoubleSide, transparent: true, opacity: 0.2 });
+        const ring1 = new THREE.Mesh(new THREE.TorusGeometry(1.8, 0.02, 16, 100), ringMat);
+        const ring2 = new THREE.Mesh(new THREE.TorusGeometry(2.1, 0.01, 16, 100), ringMat);
+        ring2.rotation.x = Math.PI / 2;
+        orbGroup.add(ring1);
+        orbGroup.add(ring2);
+
+        camera.position.z = 5;
+
+        function animateThree() {
+            requestAnimationFrame(animateThree);
+            orbGroup.rotation.y += 0.01;
+            orbGroup.rotation.x += 0.005;
+            particles.rotation.y -= 0.02;
+
+            const pulse = 1 + Math.sin(Date.now() * 0.002) * 0.1;
+            orbGroup.scale.set(pulse, pulse, pulse);
+
+            renderer.render(scene, camera);
+        }
+        animateThree();
 
         // WebSockets
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -620,6 +718,7 @@ const indexHTML = `
             recognition.onstart = () => {
                 micRipple.classList.remove('hidden');
                 speak("Listening for command.");
+                startVisualizer();
             };
 
             recognition.onresult = (event) => {
@@ -650,7 +749,18 @@ const indexHTML = `
         }
 
         let isJarvisActive = false;
-        micBtn.onclick = () => {
+        let hasInteracted = false;
+
+        document.body.onclick = () => {
+            if (!hasInteracted) {
+                hasInteracted = true;
+                initAudio();
+                speak("Neural link confirmed. APEX JARVIS is fully operational.");
+            }
+        };
+
+        micBtn.onclick = (e) => {
+            e.stopPropagation();
             initAudio();
             if (recognition) {
                 if (isJarvisActive) {
@@ -671,6 +781,7 @@ const indexHTML = `
         function playPing() {
             try {
                 initAudio();
+                if (window.navigator.vibrate) window.navigator.vibrate([30, 20, 30]);
                 const osc = audioCtx.createOscillator();
                 const gain = audioCtx.createGain();
                 osc.connect(gain);
@@ -729,14 +840,90 @@ const indexHTML = `
             }
         };
 
+        // Ambient Sound
+        let ambientOsc;
+        let ambientGain;
+        const ambientToggle = document.getElementById('ambientToggle');
+        let isAmbientOn = false;
+
+        ambientToggle.onclick = () => {
+            initAudio();
+            if (!isAmbientOn) {
+                ambientOsc = audioCtx.createOscillator();
+                ambientGain = audioCtx.createGain();
+                ambientOsc.type = 'sawtooth';
+                ambientOsc.frequency.setValueAtTime(40, audioCtx.currentTime);
+                ambientGain.gain.setValueAtTime(0, audioCtx.currentTime);
+                ambientGain.gain.linearRampToValueAtTime(0.02, audioCtx.currentTime + 2);
+
+                const filter = audioCtx.createBiquadFilter();
+                filter.type = 'lowpass';
+                filter.frequency.setValueAtTime(100, audioCtx.currentTime);
+
+                ambientOsc.connect(filter);
+                filter.connect(ambientGain);
+                ambientGain.connect(audioCtx.destination);
+
+                ambientOsc.start();
+                isAmbientOn = true;
+                ambientToggle.innerText = "AMBIENT: ON";
+                speak("Ambient atmospheric resonance engaged.");
+            } else {
+                ambientGain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 1);
+                setTimeout(() => ambientOsc.stop(), 1000);
+                isAmbientOn = false;
+                ambientToggle.innerText = "AMBIENT: OFF";
+                speak("Standard silence restored.");
+            }
+        };
+
         // Spiral Mode
         const spiralToggle = document.getElementById('spiralToggle');
-        spiralToggle.onclick = () => {
+        const spiralCanvas = document.getElementById('spiral-canvas');
+        const sCtx = spiralCanvas.getContext('2d');
+        let spiralPoints = [];
+
+        spiralToggle.onclick = (e) => {
+            e.stopPropagation();
             document.body.classList.toggle('spiral-mode-active');
             const isActive = document.body.classList.contains('spiral-mode-active');
             spiralToggle.innerText = isActive ? "TERMINATE SPIRAL" : "SPIRAL MODE";
             speak(isActive ? "Spiral visualization engaged." : "Standard interface restored.");
+            if (isActive) {
+                spiralCanvas.width = window.innerWidth;
+                spiralCanvas.height = window.innerHeight;
+                animateSpiral();
+            }
         };
+
+        function animateSpiral() {
+            if (!document.body.classList.contains('spiral-mode-active')) return;
+            requestAnimationFrame(animateSpiral);
+            sCtx.clearRect(0, 0, spiralCanvas.width, spiralCanvas.height);
+            const centerX = spiralCanvas.width / 2;
+            const centerY = spiralCanvas.height / 2;
+            const time = Date.now() * 0.001;
+
+            for (let i = 0; i < 200; i++) {
+                const angle = 0.1 * i + time;
+                const r = 2 * i;
+                const x = centerX + r * Math.cos(angle);
+                const y = centerY + r * Math.sin(angle);
+
+                sCtx.fillStyle = 'rgba(188, 19, 254, ' + (1 - i/200) + ')';
+                sCtx.beginPath();
+                sCtx.arc(x, y, 2, 0, Math.PI * 2);
+                sCtx.fill();
+
+                if (i % 20 === 0) {
+                    sCtx.strokeStyle = 'rgba(0, 243, 255, 0.2)';
+                    sCtx.beginPath();
+                    sCtx.moveTo(centerX, centerY);
+                    sCtx.lineTo(x, y);
+                    sCtx.stroke();
+                }
+            }
+        }
 
         // Web3 Integration
         const connectBtn = document.getElementById('connectWallet');
@@ -766,7 +953,7 @@ const indexHTML = `
             // Simulated Solidity Contract Generation
             const contractCode = "// SPDX-License-Identifier: MIT\n" +
 "pragma solidity ^0.8.20;\n" +
-"import \"@openzeppelin/contracts/token/ERC721/ERC721.go\";\n" +
+"import \"@openzeppelin/contracts/token/ERC721/ERC721.sol\";\n" +
 "contract ApexNFT is ERC721 {\n" +
 "    constructor() ERC721(\"ApexCollection\", \"APX\") {}\n" +
 "}";
@@ -780,9 +967,27 @@ const indexHTML = `
             deployBtn.disabled = false;
         };
 
-        // Waveform Visualizer
+        // Waveform Visualizer (Real Analyser)
         const wfCanvas = document.getElementById('waveform');
         const wfCtx = wfCanvas.getContext('2d');
+        let analyser;
+        let dataArray;
+
+        async function startVisualizer() {
+            if (!analyser) {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    const source = audioCtx.createMediaStreamSource(stream);
+                    analyser = audioCtx.createAnalyser();
+                    analyser.fftSize = 256;
+                    source.connect(analyser);
+                    dataArray = new Uint8Array(analyser.frequencyBinCount);
+                } catch (err) {
+                    console.log("Mic access denied for visualizer");
+                }
+            }
+        }
+
         function drawWave() {
             requestAnimationFrame(drawWave);
             if (micRipple.classList.contains('hidden')) {
@@ -792,18 +997,28 @@ const indexHTML = `
             wfCanvas.classList.remove('hidden');
             wfCtx.clearRect(0, 0, wfCanvas.width, wfCanvas.height);
 
-            const time = Date.now() * 0.01;
-            for (let j = 0; j < 3; j++) {
-                wfCtx.strokeStyle = j === 0 ? 'rgba(0, 243, 253, 0.8)' :
-                                   j === 1 ? 'rgba(188, 19, 254, 0.5)' :
-                                             'rgba(0, 243, 253, 0.3)';
-                wfCtx.lineWidth = j === 0 ? 2 : 1;
+            if (analyser) {
+                analyser.getByteFrequencyData(dataArray);
+                wfCtx.lineWidth = 2;
+                wfCtx.strokeStyle = 'rgba(0, 243, 255, 0.8)';
+                wfCtx.beginPath();
+                const sliceWidth = wfCanvas.width * 1.0 / dataArray.length;
+                let x = 0;
+                for (let i = 0; i < dataArray.length; i++) {
+                    const v = dataArray[i] / 128.0;
+                    const y = v * wfCanvas.height / 2;
+                    if (i === 0) wfCtx.moveTo(x, y);
+                    else wfCtx.lineTo(x, y);
+                    x += sliceWidth;
+                }
+                wfCtx.stroke();
+            } else {
+                // Fallback animated wave
+                const time = Date.now() * 0.01;
+                wfCtx.strokeStyle = 'rgba(0, 243, 255, 0.5)';
                 wfCtx.beginPath();
                 for (let i = 0; i < wfCanvas.width; i += 2) {
-                    const shift = j * 2;
-                    const freq = 0.05 + (j * 0.02);
-                    const amp = isJarvisActive ? (20 - (j * 4)) : (5);
-                    const y = wfCanvas.height / 2 + Math.sin(i * freq + time + shift) * amp * (0.8 + Math.random() * 0.4);
+                    const y = wfCanvas.height / 2 + Math.sin(i * 0.05 + time) * 10;
                     if (i === 0) wfCtx.moveTo(i, y);
                     else wfCtx.lineTo(i, y);
                 }
@@ -812,9 +1027,33 @@ const indexHTML = `
         }
         drawWave();
 
+        // Achievements & Streaks
+        let streak = parseInt(localStorage.getItem('apex_streak') || '0');
+        const lastVisit = localStorage.getItem('apex_last_visit');
+        const today = new Date().toDateString();
+
+        if (lastVisit !== today) {
+            streak++;
+            localStorage.setItem('apex_streak', streak);
+            localStorage.setItem('apex_last_visit', today);
+        }
+        document.getElementById('streakCounter').innerText = streak;
+
+        function showAchievement(desc) {
+            const popup = document.getElementById('achievementPopup');
+            document.getElementById('achievementDesc').innerText = desc;
+            popup.style.transform = 'translate(-50%, 0)';
+            playPing();
+            setTimeout(() => {
+                popup.style.transform = 'translate(-50%, -200%)';
+            }, 5000);
+        }
+
         window.onload = () => {
             setTimeout(() => {
-                speak("Welcome back. I am APEX JARVIS. Systems at optimal performance.");
+                if (streak % 5 === 0 && streak > 0) {
+                    showAchievement(streak + " Day Streak! You are becoming a master Commandant.");
+                }
             }, 1000);
         };
     </script>
