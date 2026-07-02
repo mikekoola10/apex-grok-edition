@@ -74,9 +74,9 @@ func init() {
 func logAction(task *Task, action, agent, details string) {
 	entry := LogEntry{Timestamp: time.Now().Format(time.RFC3339), Action: action, Agent: agent, Details: details}
 	mu.Lock()
+	defer mu.Unlock()
 	task.Logs = append(task.Logs, entry)
 	task.UpdatedAt = time.Now()
-	mu.Unlock()
 
 	// Broadcast to WebSocket clients
 	broadcast <- map[string]interface{}{
@@ -248,6 +248,7 @@ func getTaskStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Deep copy to avoid data races during JSON encoding
+	defer mu.RUnlock()
 	copyTask := *t
 	copyTask.Logs = make([]LogEntry, len(t.Logs))
 	copy(copyTask.Logs, t.Logs)
@@ -255,7 +256,6 @@ func getTaskStatus(w http.ResponseWriter, r *http.Request) {
 	copy(copyTask.SubTasks, t.SubTasks)
 	copyTask.Artifacts = make([]string, len(t.Artifacts))
 	copy(copyTask.Artifacts, t.Artifacts)
-	mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(copyTask)
@@ -264,11 +264,11 @@ func getTaskStatus(w http.ResponseWriter, r *http.Request) {
 func stopTask(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	mu.Lock()
+	defer mu.Unlock()
 	if t, ok := tasks[id]; ok {
 		t.Status = "stopped"
 		logActionLocked(t, "Stopped", "USER", "Process terminated by operator.")
 	}
-	mu.Unlock()
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -796,11 +796,32 @@ const indexHTML = `
             } catch(e) {}
         }
 
+        function showError(msg) {
+            console.error(msg);
+            aiResponse.innerText = "SYSTEM ERROR: " + msg;
+            aiResponse.style.color = "var(--neon-purple)";
+            speak("Alert. " + msg);
+            setTimeout(() => {
+                aiResponse.style.color = "var(--neon-cyan)";
+            }, 5000);
+        }
+
         function speak(text) {
+            if (!window.speechSynthesis) return;
+            speechSynthesis.cancel();
             const utterance = new SpeechSynthesisUtterance(text);
             utterance.pitch = 0.8;
-            utterance.rate = 1;
-            utterance.voice = speechSynthesis.getVoices().find(v => v.name.includes('Google UK English Male')) || null;
+            utterance.rate = 1.1;
+
+            const voices = speechSynthesis.getVoices();
+            const preferred = ['Google UK English Male', 'Daniel', 'Arthur', 'Microsoft James'];
+            let voice = null;
+            for (const p of preferred) {
+                voice = voices.find(v => v.name.includes(p));
+                if (voice) break;
+            }
+            utterance.voice = voice || voices[0];
+
             speechSynthesis.speak(utterance);
 
             // Typing effect for visual feedback
@@ -813,24 +834,30 @@ const indexHTML = `
                 } else {
                     clearInterval(timer);
                 }
-            }, 30);
+            }, 25);
         }
 
         async function executeCommand(goal) {
             if (!goal) return;
-            playPing();
-            addLog('USER', 'COMMAND', goal);
-            document.getElementById('jarvis-eye').classList.add('thinking');
+            try {
+                playPing();
+                addLog('USER', 'COMMAND', goal);
+                document.getElementById('jarvis-eye').classList.add('thinking');
 
-            const res = await fetch('/task', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({goal})
-            });
-            const data = await res.json();
-            document.getElementById('jarvis-eye').classList.remove('thinking');
-            document.getElementById('taskGoal').innerText = goal;
-            speak("Mission accepted. Orchestrating sub-agents for goal: " + goal);
+                const res = await fetch('/task', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({goal})
+                });
+                if (!res.ok) throw new Error("Neural uplink failed: " + res.statusText);
+                const data = await res.json();
+                document.getElementById('jarvis-eye').classList.remove('thinking');
+                document.getElementById('taskGoal').innerText = goal;
+                speak("Mission accepted. Orchestrating sub-agents for goal: " + goal);
+            } catch (err) {
+                document.getElementById('jarvis-eye').classList.remove('thinking');
+                showError(err.message);
+            }
         }
 
         userInput.onkeypress = (e) => {
@@ -947,24 +974,30 @@ const indexHTML = `
         };
 
         deployBtn.onclick = async () => {
-            speak("Initiating NFT smart contract deployment on Sepolia. Generating Solidity boilerplate.");
-            deployBtn.disabled = true;
+            try {
+                speak("Initiating NFT smart contract deployment on Sepolia. Generating Solidity boilerplate.");
+                deployBtn.disabled = true;
 
-            // Simulated Solidity Contract Generation
-            const contractCode = "// SPDX-License-Identifier: MIT\n" +
-"pragma solidity ^0.8.20;\n" +
-"import \"@openzeppelin/contracts/token/ERC721/ERC721.sol\";\n" +
-"contract ApexNFT is ERC721 {\n" +
-"    constructor() ERC721(\"ApexCollection\", \"APX\") {}\n" +
-"}";
-            addLog('JARVIS', 'GENERATED', 'Solidity contract "ApexNFT" created.');
-            console.log(contractCode);
+                // Simulated Solidity Contract Generation
+                const contractCode = "// SPDX-License-Identifier: MIT\n" +
+    "pragma solidity ^0.8.20;\n" +
+    "import \"@openzeppelin/contracts/token/ERC721/ERC721.sol\";\n" +
+    "contract ApexNFT is ERC721 {\n" +
+    "    constructor() ERC721(\"ApexCollection\", \"APX\") {}\n" +
+    "}";
+                addLog('JARVIS', 'GENERATED', 'Solidity contract "ApexNFT" created.');
+                console.log(contractCode);
 
-            const res = await fetch('/deploy-nft', { method: 'POST' });
-            const data = await res.json();
-            addLog('WEB3', 'DEPLOYED', 'TX: ' + data.tx_hash);
-            speak("Success. Contract deployed to Sepolia. Transaction hash broadcast to the mesh.");
-            deployBtn.disabled = false;
+                const res = await fetch('/deploy-nft', { method: 'POST' });
+                if (!res.ok) throw new Error("Web3 deployment failed.");
+                const data = await res.json();
+                addLog('WEB3', 'DEPLOYED', 'TX: ' + data.tx_hash);
+                speak("Success. Contract deployed to Sepolia. Transaction hash broadcast to the mesh.");
+            } catch (err) {
+                showError(err.message);
+            } finally {
+                deployBtn.disabled = false;
+            }
         };
 
         // Waveform Visualizer (Real Analyser)
