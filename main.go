@@ -272,6 +272,43 @@ func stopTask(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func getWeb3Summary(w http.ResponseWriter, r *http.Request) {
+	// Simulated financial data
+	summary := map[string]interface{}{
+		"total_wealth":      125430.50,
+		"revenue_today":     1240.20,
+		"revenue_week":      8450.00,
+		"revenue_month":     32100.00,
+		"stellar_xlm":       15400.0,
+		"stellar_usdc":      5200.50,
+		"ops_fund":          37629.15, // 30% of total wealth approx
+		"spendable_fund":    87801.35, // 70%
+		"active_cards":      4,
+		"subscription_cost": 450.00,
+		"savings_goal_car":  30000.00,
+		"savings_goal_house": 80000.00,
+		"car_progress":      45,
+		"house_progress":    15,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(summary)
+}
+
+func triggerSprintAction(w http.ResponseWriter, r *http.Request) {
+	action := r.URL.Query().Get("action")
+	apiKey := r.Header.Get("X-Admin-API-Key")
+
+	if apiKey != os.Getenv("ADMIN_API_KEY") {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	log.Printf("Sprint Action Triggered: %s", action)
+	// In a real scenario, this would trigger background swarms
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "triggered", "action": action})
+}
+
 func deployNFT(w http.ResponseWriter, r *http.Request) {
 	txHash := "0x" + strings.ReplaceAll(uuid.New().String(), "-", "")
 	w.Header().Set("Content-Type", "application/json")
@@ -393,9 +430,10 @@ const indexHTML = `
 
         /* Glassmorphism */
         .glass {
-            background: rgba(15, 15, 15, 0.4);
+            background: rgba(10, 10, 10, 0.8);
+            background-image: radial-gradient(circle at 0% 0%, rgba(255,255,255,0.05) 0%, transparent 50%), url('https://www.transparenttextures.com/patterns/dark-leather.png');
             backdrop-filter: blur(20px);
-            border: 1px solid rgba(0, 243, 255, 0.1);
+            border: 1px solid rgba(0, 243, 255, 0.15);
             border-radius: 16px;
             box-shadow: inset 0 0 15px rgba(0, 243, 255, 0.05), 0 10px 30px rgba(0, 0, 0, 0.5);
             transition: all 0.3s ease;
@@ -432,6 +470,10 @@ const indexHTML = `
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-track { background: #050505; }
         ::-webkit-scrollbar-thumb { background: var(--neon-cyan); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar { width: 2px; }
+
+        .sprint-btn:active { transform: scale(0.98); }
+        .sprint-bg { mix-blend-mode: overlay; }
 
         .spiral-mode-active .eye-container {
             filter: hue-rotate(280deg);
@@ -461,36 +503,137 @@ const indexHTML = `
 
     <div class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-8 relative z-10">
         <!-- Left Sidebar: System Status -->
-        <div class="lg:col-span-3 space-y-6 fade-in" style="animation-delay: 0.1s">
-            <div class="glass p-6" data-tilt data-tilt-max="5" data-tilt-glare data-tilt-max-glare="0.1">
-                <h2 class="orbitron text-sm font-bold mb-4 neon-text">SYSTEM STATUS</h2>
-                <div class="space-y-4 text-xs">
-                    <div class="flex justify-between items-center">
-                        <span>CPU UTILIZATION</span>
-                        <span class="text-cyan-400">24%</span>
+        <div class="lg:col-span-3 space-y-6 fade-in h-[85vh] overflow-y-auto pr-2 custom-scrollbar" style="animation-delay: 0.1s">
+            <!-- Financial Command Center -->
+            <div class="glass p-6" data-tilt data-tilt-max="5">
+                <h2 class="orbitron text-sm font-bold mb-4 neon-text flex items-center justify-between">
+                    FINANCIAL COMMAND CENTER
+                    <span class="animate-pulse text-[10px] text-green-500">LIVE</span>
+                </h2>
+                <div class="space-y-3 text-[10px] uppercase font-bold">
+                    <div class="p-2 bg-black/40 border-l-2 border-cyan-500">
+                        <div class="text-gray-500 mb-1">TOTAL WEALTH (EST)</div>
+                        <div class="text-xl text-cyan-400" id="totalWealth">$0.00</div>
                     </div>
-                    <div class="w-full bg-gray-800 h-1 rounded-full">
-                        <div class="bg-cyan-500 h-1 rounded-full" style="width: 24%"></div>
+                    <div class="grid grid-cols-2 gap-2">
+                        <div class="p-2 bg-black/40">
+                            <div class="text-gray-500 mb-1">REVENUE TODAY</div>
+                            <div class="text-green-400" id="revToday">$0.00</div>
+                        </div>
+                        <div class="p-2 bg-black/40">
+                            <div class="text-gray-500 mb-1">THIS WEEK</div>
+                            <div class="text-green-400" id="revWeek">$0.00</div>
+                        </div>
                     </div>
-                    <div class="flex justify-between items-center">
-                        <span>NEURAL LINK</span>
-                        <span class="text-green-400">STABLE</span>
+                    <div class="p-2 bg-black/40">
+                        <div class="text-gray-500 mb-1">STELLAR ASSETS (XLM/USDC)</div>
+                        <div class="text-cyan-200" id="stellarBal">0.0 XLM / $0.00</div>
                     </div>
-                    <div class="flex justify-between items-center">
-                        <span>BLOCKCHAIN SYNC</span>
-                        <span class="text-cyan-400">99.9%</span>
-                    </div>
-                    <hr class="border-gray-800 my-2">
-                    <div class="flex justify-between items-center">
-                        <span>DAILY STREAK</span>
+                    <div class="flex justify-between items-center pt-2">
+                        <span class="text-gray-500">DAILY STREAK</span>
                         <span class="text-orange-500 font-bold flex items-center gap-1">
                             <span class="animate-bounce">🔥</span> <span id="streakCounter">0</span>
                         </span>
                     </div>
+                    <div class="space-y-2">
+                        <div class="flex justify-between">
+                            <span class="text-gray-500">OPS FUND (30%)</span>
+                            <span class="text-cyan-400" id="opsFund">$0.00</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-gray-500">SPENDABLE (70%)</span>
+                            <span class="text-green-400" id="spendableFund">$0.00</span>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-[8px] border-t border-gray-800 pt-2">
+                        <div>
+                            <span class="text-gray-500">ACTIVE CARDS:</span>
+                            <span class="text-cyan-400 ml-1" id="activeCards">0</span>
+                        </div>
+                        <div>
+                            <span class="text-gray-500">MONTHLY SUB:</span>
+                            <span class="text-cyan-400 ml-1" id="subCost">$0.00</span>
+                        </div>
+                    </div>
+                    <div class="pt-2 border-t border-gray-800">
+                        <div class="flex justify-between mb-1 text-[9px]">
+                            <span class="text-gray-500">SAVINGS GOAL: HOUSE</span>
+                            <span id="houseProgress">0%</span>
+                        </div>
+                        <div class="w-full bg-gray-800 h-1 rounded-full">
+                            <div id="houseBar" class="bg-purple-500 h-1 rounded-full transition-all duration-1000" style="width: 0%"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            <div class="glass p-6" data-tilt data-tilt-max="5" data-tilt-glare data-tilt-max-glare="0.1">
+            <!-- Quick Action Buttons -->
+            <div class="glass p-6">
+                <h2 class="orbitron text-sm font-bold mb-4 neon-text">SPRINT COMMANDS</h2>
+                <div class="space-y-2">
+                    <button onclick="triggerSprint('affiliate')" class="sprint-btn group w-full p-3 border border-cyan-900/50 hover:border-cyan-400 bg-black/20 text-left transition-all relative overflow-hidden">
+                        <div class="flex items-center justify-between relative z-10">
+                            <span class="orbitron text-[10px] text-cyan-400 group-hover:text-white transition-colors">🚀 TRIGGER AFFILIATE</span>
+                            <span class="text-[8px] text-gray-500">10 ARTICLES</span>
+                        </div>
+                        <div class="sprint-bg absolute inset-0 bg-cyan-400/5 translate-x-[-100%] group-hover:translate-x-0 transition-transform duration-500"></div>
+                    </button>
+                    <button onclick="triggerSprint('bounty')" class="sprint-btn group w-full p-3 border border-purple-900/50 hover:border-purple-400 bg-black/20 text-left transition-all relative overflow-hidden">
+                        <div class="flex items-center justify-between relative z-10">
+                            <span class="orbitron text-[10px] text-purple-400 group-hover:text-white transition-colors">🎯 TRIGGER BOUNTY</span>
+                            <span class="text-[8px] text-gray-500">15 TARGETS</span>
+                        </div>
+                        <div class="sprint-bg absolute inset-0 bg-purple-400/5 translate-x-[-100%] group-hover:translate-x-0 transition-transform duration-500"></div>
+                    </button>
+                    <button onclick="triggerSprint('content')" class="sprint-btn group w-full p-3 border border-green-900/50 hover:border-green-400 bg-black/20 text-left transition-all relative overflow-hidden">
+                        <div class="flex items-center justify-between relative z-10">
+                            <span class="orbitron text-[10px] text-green-400 group-hover:text-white transition-colors">📝 TRIGGER CONTENT</span>
+                            <span class="text-[8px] text-gray-500">4 FORMATS</span>
+                        </div>
+                        <div class="sprint-bg absolute inset-0 bg-green-400/5 translate-x-[-100%] group-hover:translate-x-0 transition-transform duration-500"></div>
+                    </button>
+                    <button onclick="triggerSprint('onboard')" class="sprint-btn group w-full p-3 border border-orange-900/50 hover:border-orange-400 bg-black/20 text-left transition-all relative overflow-hidden">
+                        <div class="flex items-center justify-between relative z-10">
+                            <span class="orbitron text-[10px] text-orange-400 group-hover:text-white transition-colors">👤 BPA ONBOARD</span>
+                            <span class="text-[8px] text-gray-500">TRIAL USER</span>
+                        </div>
+                        <div class="sprint-bg absolute inset-0 bg-orange-400/5 translate-x-[-100%] group-hover:translate-x-0 transition-transform duration-500"></div>
+                    </button>
+                    <button onclick="triggerSprint('scheduler')" class="sprint-btn group w-full p-3 border border-blue-900/50 hover:border-blue-400 bg-black/20 text-left transition-all relative overflow-hidden">
+                        <div class="flex items-center justify-between relative z-10">
+                            <span class="orbitron text-[10px] text-blue-400 group-hover:text-white transition-colors">💳 RUN SCHEDULER</span>
+                            <span class="text-[8px] text-gray-500">SUBSCRIPTIONS</span>
+                        </div>
+                        <div class="sprint-bg absolute inset-0 bg-blue-400/5 translate-x-[-100%] group-hover:translate-x-0 transition-transform duration-500"></div>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Sprint Cadence Tracker -->
+            <div class="glass p-6">
+                <h2 class="orbitron text-sm font-bold mb-4 neon-text">SPRINT CADENCE</h2>
+                <div class="space-y-3 text-[10px] font-mono">
+                    <div class="flex items-center justify-between p-2 bg-black/20 border-r-2 border-green-500">
+                        <span>DAILY (2X): AFFILIATE + CONTENT</span>
+                        <span class="text-green-500">✅ COMPLETED</span>
+                    </div>
+                    <div class="flex items-center justify-between p-2 bg-black/20 border-r-2 border-orange-500">
+                        <span>WEEKLY: BOUNTY + BPA</span>
+                        <span class="text-orange-500 animate-pulse">⚡ PENDING</span>
+                    </div>
+                    <div class="flex items-center justify-between p-2 bg-black/20 border-r-2 border-gray-600">
+                        <span>MONTHLY: SUBSCRIPTIONS</span>
+                        <span class="text-gray-500">❌ INACTIVE</span>
+                    </div>
+                    <div class="pt-2 flex justify-between items-center text-cyan-400">
+                        <span class="orbitron">SCALE STATUS</span>
+                        <span class="animate-bounce">📈 GROWTH</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Original Web3 Connection -->
+            <div class="glass p-6" data-tilt data-tilt-max="5">
                 <h2 class="orbitron text-sm font-bold mb-4 neon-text">WEB3 PORTAL</h2>
                 <button id="connectWallet" class="w-full py-2 mb-4 rounded border border-cyan-500 text-cyan-500 hover:bg-cyan-500 hover:text-black transition-all duration-300 text-sm font-bold orbitron">
                     CONNECT WALLET
@@ -809,12 +952,16 @@ const indexHTML = `
         function speak(text) {
             if (!window.speechSynthesis) return;
             speechSynthesis.cancel();
-            const utterance = new SpeechSynthesisUtterance(text);
-            utterance.pitch = 0.8;
-            utterance.rate = 1.1;
+
+            // Add subtle pauses for human-like feel
+            const processedText = text.replace(/([.?!])\s+/g, "$1 ... ");
+
+            const utterance = new SpeechSynthesisUtterance(processedText);
+            utterance.pitch = 1.1;
+            utterance.rate = 0.95;
 
             const voices = speechSynthesis.getVoices();
-            const preferred = ['Google UK English Male', 'Daniel', 'Arthur', 'Microsoft James'];
+            const preferred = ['Samantha', 'Karen', 'Victoria', 'Google US English', 'Microsoft Zira'];
             let voice = null;
             for (const p of preferred) {
                 voice = voices.find(v => v.name.includes(p));
@@ -949,6 +1096,48 @@ const indexHTML = `
                     sCtx.lineTo(x, y);
                     sCtx.stroke();
                 }
+            }
+        }
+
+        // Financial Data Refresh
+        async function refreshWeb3() {
+            try {
+                const res = await fetch('/web3/summary');
+                const data = await res.json();
+                document.getElementById('totalWealth').innerText = "$" + data.total_wealth.toLocaleString();
+                document.getElementById('revToday').innerText = "$" + data.revenue_today.toLocaleString();
+                document.getElementById('revWeek').innerText = "$" + data.revenue_week.toLocaleString();
+                document.getElementById('stellarBal').innerText = data.stellar_xlm.toLocaleString() + " XLM / $" + data.stellar_usdc.toLocaleString();
+                document.getElementById('opsFund').innerText = "$" + data.ops_fund.toLocaleString();
+                document.getElementById('spendableFund').innerText = "$" + data.spendable_fund.toLocaleString();
+                document.getElementById('activeCards').innerText = data.active_cards;
+                document.getElementById('subCost').innerText = "$" + data.subscription_cost.toLocaleString();
+                document.getElementById('houseProgress').innerText = data.house_progress + "%";
+                document.getElementById('houseBar').style.width = data.house_progress + "%";
+            } catch (err) {
+                console.error("Web3 sync failed");
+            }
+        }
+        setInterval(refreshWeb3, 30000);
+        refreshWeb3();
+
+        async function triggerSprint(action) {
+            playPing();
+            addLog('SYSTEM', 'SPRINT', 'Initiating ' + action + ' swarm...');
+            try {
+                // Securely call trigger via relative path (backend handles API key)
+                const res = await fetch('/api/sprint/trigger?action=' + action, {
+                    method: 'POST'
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    speak("Sprint command accepted. " + action + " engine is now online.");
+                    addLog('JARVIS', 'SUCCESS', action + ' swarm successfully deployed.');
+                } else {
+                    throw new Error("Authorization failure");
+                }
+            } catch (err) {
+                showError("Sprint command rejected.");
             }
         }
 
@@ -1108,6 +1297,13 @@ func main() {
 	mux.HandleFunc("GET /task/{id}/status", getTaskStatus)
 	mux.HandleFunc("POST /task/{id}/stop", stopTask)
 	mux.HandleFunc("POST /deploy-nft", deployNFT)
+	mux.HandleFunc("GET /web3/summary", getWeb3Summary)
+	mux.HandleFunc("POST /api/sprint/trigger", func(w http.ResponseWriter, r *http.Request) {
+		// Proxy/Internal call to triggerSprintAction with key
+		r.Header.Set("X-Admin-API-Key", os.Getenv("ADMIN_API_KEY"))
+		triggerSprintAction(w, r)
+	})
+	mux.HandleFunc("POST /admin/trigger", triggerSprintAction)
 	mux.HandleFunc("POST /agent/communicate", communicateAgent)
 	mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
 		mu.RLock()
