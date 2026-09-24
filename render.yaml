@@ -2,8 +2,15 @@ services:
   - type: web
     name: apex-jarvis
     env: go
-    buildCommand: go build -tags netgo -ldflags '-s -w' -o app main.go
+    buildCommand: go build -tags netgo -ldflags '-s -w' -o app .
     startCommand: ./app
     envVars:
       - key: PORT
         value: 8080
+      - key: LLM_MODEL
+        value: zai-org/GLM-5.3
+      - key: LLM_BASE_URL
+        value: https://router.huggingface.co/v1
+      # Set HF_TOKEN in the Render dashboard (Environment tab). Never commit it.
+      - key: HF_TOKEN
+        sync: false

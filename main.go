@@ -133,25 +133,31 @@ func executeTaskAsync(task *Task) {
 			}
 			mu.RUnlock()
 
-			time.Sleep(1500 * time.Millisecond)
+			result, err := runSubTask(task, st)
 
 			mu.Lock()
 			defer mu.Unlock()
 			if task.Status == "stopped" {
 				return
 			}
-			st.Status = "completed"
-			st.Result = st.Type + " task finished successfully"
-			task.Artifacts = append(task.Artifacts, st.Type+"-artifact-"+uuid.New().String()[:4])
+			if err != nil {
+				st.Status = "failed"
+				st.Result = "failed: " + err.Error()
+				logActionLocked(task, "SubTask Failed", "AGENT-"+strings.ToUpper(st.Type), st.Goal+" \u2014 "+err.Error())
+			} else {
+				st.Status = "completed"
+				st.Result = result
+				task.Artifacts = append(task.Artifacts, st.Type+"-artifact-"+uuid.New().String()[:4])
+				logActionLocked(task, "SubTask Complete", "AGENT-"+strings.ToUpper(st.Type), st.Goal)
+			}
 
-			completedCount := 0
+			finished := 0
 			for _, s := range task.SubTasks {
-				if s.Status == "completed" {
-					completedCount++
+				if s.Status == "completed" || s.Status == "failed" {
+					finished++
 				}
 			}
-			task.Progress = (completedCount * 100) / len(task.SubTasks)
-			logActionLocked(task, "SubTask Complete", "AGENT-"+strings.ToUpper(st.Type), st.Goal)
+			task.Progress = (finished * 100) / len(task.SubTasks)
 
 			broadcast <- map[string]interface{}{
 				"type":     "task_update",
@@ -165,9 +171,26 @@ func executeTaskAsync(task *Task) {
 
 	mu.Lock()
 	if task.Status != "stopped" {
-		task.Status = "completed"
-		task.Progress = 100
-		logActionLocked(task, "Finalized", "JARVIS", "Goal achieved.")
+		failed := 0
+		for _, s := range task.SubTasks {
+			if s.Status == "failed" {
+				failed++
+			}
+		}
+		switch {
+		case failed == len(task.SubTasks):
+			task.Status = "failed"
+			task.Progress = 100
+			logActionLocked(task, "Finalized", "JARVIS", "All subtasks failed.")
+		case failed > 0:
+			task.Status = "completed_with_errors"
+			task.Progress = 100
+			logActionLocked(task, "Finalized", "JARVIS", "Goal finished with errors.")
+		default:
+			task.Status = "completed"
+			task.Progress = 100
+			logActionLocked(task, "Finalized", "JARVIS", "Goal achieved.")
+		}
 	}
 	mu.Unlock()
 
@@ -209,7 +232,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func createTask(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Goal string `json:"goal"` }
+	var req struct {
+		Goal string `json:"goal"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
@@ -219,7 +244,7 @@ func createTask(w http.ResponseWriter, r *http.Request) {
 		ID:        id,
 		Goal:      req.Goal,
 		Status:    "running",
-		SubTasks:  decomposeGoal(req.Goal),
+		SubTasks:  planGoal(req.Goal),
 		CreatedAt: time.Now(),
 		SandboxID: createSandbox(id),
 		Logs:      []LogEntry{},
@@ -275,11 +300,22 @@ func deployNFT(w http.ResponseWriter, r *http.Request) {
 }
 
 func communicateAgent(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Message string `json:"message"` }
+	var req struct {
+		Message string `json:"message"`
+	}
 	json.NewDecoder(r.Body).Decode(&req)
-	response := "I am processing your request: " + req.Message
-	if strings.Contains(strings.ToLower(req.Message), "hello") {
+	var response string
+	switch {
+	case brainAvailable():
+		if out, err := chatComplete("You are APEX, an autonomous AI agent. Answer directly and usefully. Keep replies tight.", req.Message); err == nil {
+			response = out
+		} else {
+			response = "My brain hit an error: " + err.Error()
+		}
+	case strings.Contains(strings.ToLower(req.Message), "hello"):
 		response = "Greetings. I am APEX JARVIS. How may I assist your mission today?"
+	default:
+		response = "My brain is not configured yet — set the HF_TOKEN environment variable on the server, then ask me again."
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"response": response})
