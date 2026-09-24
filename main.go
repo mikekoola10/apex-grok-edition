@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -133,7 +134,7 @@ func executeTaskAsync(task *Task) {
 			}
 			mu.RUnlock()
 
-			result, err := runSubTask(task, st)
+			result, artifact, err := runSubTask(task, st)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -147,7 +148,9 @@ func executeTaskAsync(task *Task) {
 			} else {
 				st.Status = "completed"
 				st.Result = result
-				task.Artifacts = append(task.Artifacts, st.Type+"-artifact-"+uuid.New().String()[:4])
+				if artifact != "" {
+					task.Artifacts = append(task.Artifacts, artifact)
+				}
 				logActionLocked(task, "SubTask Complete", "AGENT-"+strings.ToUpper(st.Type), st.Goal)
 			}
 
@@ -873,6 +876,7 @@ func main() {
 	mux.HandleFunc("POST /task/{id}/stop", stopTask)
 	mux.HandleFunc("POST /deploy-nft", deployNFT)
 	mux.HandleFunc("POST /agent/communicate", communicateAgent)
+	mux.HandleFunc("GET /task/{id}/artifact/{name}", getArtifact)
 	mux.HandleFunc("GET /dashboard", func(w http.ResponseWriter, r *http.Request) {
 		mu.RLock()
 		defer mu.RUnlock()
@@ -884,6 +888,65 @@ func main() {
 		port = "8080"
 	}
 
+	corsOrigin := os.Getenv("APEX_CORS_ORIGIN")
+	if corsOrigin == "" {
+		corsOrigin = "*"
+	}
+
 	log.Printf("🚀 APEX JARVIS IS ONLINE — http://localhost:%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(mux, corsOrigin)))
+}
+
+// corsMiddleware lets Nova's frontend (served from a different origin) call
+// the office API from the browser. Set APEX_CORS_ORIGIN to lock it down to a
+// single origin; it defaults to "*" for a personal, unauthenticated office.
+func corsMiddleware(next http.Handler, origin string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// getArtifact serves a file the office produced for a task. Only names the
+// task itself recorded are served, and the path is forced to stay inside the
+// task's workspace directory.
+func getArtifact(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	name := r.PathValue("name")
+
+	mu.RLock()
+	t, ok := tasks[id]
+	mu.RUnlock()
+	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	known := false
+	for _, a := range t.Artifacts {
+		if a == name {
+			known = true
+			break
+		}
+	}
+	if !known {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	dir, err := filepath.Abs(workspaceDir(id))
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	p, err := filepath.Abs(filepath.Join(dir, name))
+	if err != nil || (p != dir && !strings.HasPrefix(p, dir+string(os.PathSeparator))) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	http.ServeFile(w, r, p)
 }

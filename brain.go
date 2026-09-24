@@ -215,10 +215,11 @@ Rules:
 var errBrainMissing = fmt.Errorf("brain not configured: set the HF_TOKEN environment variable on the server")
 
 // runSubTask does the actual work for one subtask and returns a human-readable
-// result. It returns an error instead of a fake success when it cannot work.
-func runSubTask(task *Task, st *SubTask) (string, error) {
+// result plus the artifact file name it produced ("" when none). It returns
+// an error instead of a fake success when it cannot work.
+func runSubTask(task *Task, st *SubTask) (string, string, error) {
 	if !brainAvailable() {
-		return "", errBrainMissing
+		return "", "", errBrainMissing
 	}
 	switch st.Type {
 	case "file":
@@ -253,46 +254,47 @@ func safeFileName(goal string) string {
 }
 
 // generateFile asks the brain to write real content and saves it as an artifact.
-func generateFile(task *Task, st *SubTask) (string, error) {
+func generateFile(task *Task, st *SubTask) (string, string, error) {
 	system := `You are a worker agent for APEX. Generate exactly what the user asked for: a complete document, report, or code file. Output ONLY the file content — no preamble, no fences unless the content itself is code that needs them, no commentary.`
 	content, err := chatComplete(system, fmt.Sprintf("Task goal: %s\nFile request: %s", task.Goal, st.Goal))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	dir := workspaceDir(task.ID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("could not create workspace: %w", err)
+		return "", "", fmt.Errorf("could not create workspace: %w", err)
 	}
 	name := safeFileName(st.Goal)
 	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return "", fmt.Errorf("could not write artifact: %w", err)
+		return "", "", fmt.Errorf("could not write artifact: %w", err)
 	}
-	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), nil
+	return fmt.Sprintf("wrote %d bytes to %s", len(content), path), name, nil
 }
 
 // analyzeData asks the brain to actually analyze or transform information.
-func analyzeData(task *Task, st *SubTask) (string, error) {
+func analyzeData(task *Task, st *SubTask) (string, string, error) {
 	system := `You are a worker agent for APEX. Analyze, summarize, or transform exactly what is asked. Be concrete and useful. No filler.`
 	out, err := chatComplete(system, fmt.Sprintf("Task goal: %s\nWork item: %s", task.Goal, st.Goal))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	// Persist the analysis as an artifact too, so nothing is lost.
+	name := safeFileName(st.Goal)
 	dir := workspaceDir(task.ID)
 	if err := os.MkdirAll(dir, 0o755); err == nil {
-		_ = os.WriteFile(filepath.Join(dir, safeFileName(st.Goal)), []byte(out), 0o644)
+		_ = os.WriteFile(filepath.Join(dir, name), []byte(out), 0o644)
 	}
-	return truncate(out, 600), nil
+	return truncate(out, 600), name, nil
 }
 
 var urlRe = regexp.MustCompile(`https?://[^\s"'<>]+`)
 
 // browseAndSummarize fetches real pages (v1: plain HTTP GET + summarize).
 // It does not drive a browser; results are labeled accordingly.
-func browseAndSummarize(task *Task, st *SubTask) (string, error) {
+func browseAndSummarize(task *Task, st *SubTask) (string, string, error) {
 	text := task.Goal + " " + st.Goal
 	urls := urlRe.FindAllString(text, 3)
 
@@ -321,14 +323,15 @@ func browseAndSummarize(task *Task, st *SubTask) (string, error) {
 	system := `You are a worker agent for APEX. Summarize the fetched page content below into a tight, useful brief. If a fetch failed or no URL was given, say so plainly and give the best knowledge-based brief you can, labeled as such.`
 	out, err := chatComplete(system, fmt.Sprintf("Task goal: %s\nWork item: %s\n\nFetched content:\n%s", task.Goal, st.Goal, fetched.String()))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
+	name := safeFileName(st.Goal)
 	dir := workspaceDir(task.ID)
 	if err := os.MkdirAll(dir, 0o755); err == nil {
-		_ = os.WriteFile(filepath.Join(dir, safeFileName(st.Goal)), []byte(out), 0o644)
+		_ = os.WriteFile(filepath.Join(dir, name), []byte(out), 0o644)
 	}
-	return truncate(out, 600), nil
+	return truncate(out, 600), name, nil
 }
 
 var tagRe = regexp.MustCompile(`(?s)<script.*?</script>|(?s)<style.*?</style>|(?s)<!--.*?-->|<[^>]+>`)

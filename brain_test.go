@@ -116,7 +116,7 @@ func TestRunSubTaskHonestWithoutBrain(t *testing.T) {
 	clearBrainEnv(t)
 	task := &Task{ID: "t1", Goal: "g"}
 	st := &SubTask{ID: "s1", Type: "file", Goal: "write notes.md"}
-	if _, err := runSubTask(task, st); err == nil || !strings.Contains(err.Error(), "HF_TOKEN") {
+	if _, _, err := runSubTask(task, st); err == nil || !strings.Contains(err.Error(), "HF_TOKEN") {
 		t.Errorf("expected honest brain-missing error, got %v", err)
 	}
 }
@@ -135,7 +135,7 @@ func TestGenerateFileWritesRealArtifact(t *testing.T) {
 
 	task := &Task{ID: "abc123", Goal: "summarize"}
 	st := &SubTask{ID: "s1", Type: "file", Goal: "Write summary.md"}
-	res, err := runSubTask(task, st)
+	res, _, err := runSubTask(task, st)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
