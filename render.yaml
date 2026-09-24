@@ -14,3 +14,8 @@ services:
       # Set HF_TOKEN in the Render dashboard (Environment tab). Never commit it.
       - key: HF_TOKEN
         sync: false
+      # Office notebook: Postgres connection string (e.g. Neon, free tier is
+      # plenty). Set DATABASE_URL in the dashboard. When unset, the office
+      # runs on memory and history does NOT survive restarts.
+      - key: DATABASE_URL
+        sync: false

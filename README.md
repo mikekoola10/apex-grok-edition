@@ -64,10 +64,31 @@ curl localhost:8080/task/<task_id>/status
 | GET    | `/`                   | Web UI                               |
 | GET    | `/ws`                 | WebSocket: live logs + task updates   |
 | POST   | `/task`               | Create a task: `{"goal":"..."}`      |
+| GET    | `/tasks`              | Office history: task summaries, newest first |
 | GET    | `/task/{id}/status`   | Task state, subtasks, artifacts      |
 | POST   | `/task/{id}/stop`     | Stop a running task                  |
+| GET    | `/task/{id}/artifact/{name}` | Download a finished file      |
 | POST   | `/agent/communicate`  | Chat with the brain: `{"message":"…"}`|
 | GET    | `/dashboard`          | All tasks (JSON)                     |
+
+## Office history (the notebook)
+
+Tasks used to live only in server memory and files on the ephemeral disk —
+a redeploy wiped both. Now the office keeps a notebook:
+
+- Every task snapshot (goal, status, plan, logs, artifact names) is written
+  to the notebook on every update.
+- Every finished file's contents are written to the notebook too, so
+  downloads keep working after restarts and redeploys.
+- On boot the office reloads everything. Tasks caught mid-flight are marked
+  `failed` with an honest note instead of left "running" forever.
+
+The notebook is Postgres. Set `DATABASE_URL` on the Render service (a Neon
+free-tier database is plenty — office files are kilobytes) and the office
+creates its two tables itself on boot (`office_tasks`, `office_artifacts`;
+see `migrations/0001_office_history.sql`). With no `DATABASE_URL` the office
+runs on memory and history does not survive restarts — the logs say which
+notebook is in use at startup.
 
 ## Known stubs
 

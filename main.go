@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -65,7 +66,47 @@ var (
 	clients   = make(map[*websocket.Conn]bool)
 	broadcast = make(chan interface{}, 100)
 	clientsMu sync.Mutex
+	// taskStore is the office notebook. It is nil until main() picks it
+	// (Postgres when DATABASE_URL is set, memory otherwise).
+	taskStore TaskStore
 )
+
+// persistTask writes the task's current snapshot to the notebook.
+// It snapshots under a read lock and does all I/O after releasing it,
+// so a slow database never blocks the office.
+func persistTask(id string) {
+	if taskStore == nil {
+		return
+	}
+	mu.RLock()
+	t, ok := tasks[id]
+	var row taskRow
+	if ok {
+		row = snapshotTask(t)
+	}
+	mu.RUnlock()
+	if !ok {
+		return
+	}
+	if err := taskStore.UpsertTask(row); err != nil {
+		log.Printf("[store] persist task %s: %v", id, err)
+	}
+}
+
+// persistArtifact copies a finished file from the workspace into the notebook
+// so downloads keep working after restarts and redeploys.
+func persistArtifact(taskID, name string) {
+	if taskStore == nil || name == "" {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(workspaceDir(taskID), name))
+	if err != nil {
+		return // worker never wrote the file; nothing to remember
+	}
+	if err := taskStore.SaveArtifact(taskID, name, string(data)); err != nil {
+		log.Printf("[store] persist artifact %s/%s: %v", taskID, name, err)
+	}
+}
 
 func init() {
 	go processQueue()
@@ -137,8 +178,8 @@ func executeTaskAsync(task *Task) {
 			result, artifact, err := runSubTask(task, st)
 
 			mu.Lock()
-			defer mu.Unlock()
 			if task.Status == "stopped" {
+				mu.Unlock()
 				return
 			}
 			if err != nil {
@@ -161,12 +202,21 @@ func executeTaskAsync(task *Task) {
 				}
 			}
 			task.Progress = (finished * 100) / len(task.SubTasks)
+			progress, status := task.Progress, task.Status
+			mu.Unlock()
+
+			// Outside the lock: write the subtask's outcome to the notebook,
+			// and remember any file it produced.
+			persistTask(task.ID)
+			if err == nil {
+				persistArtifact(task.ID, artifact)
+			}
 
 			broadcast <- map[string]interface{}{
 				"type":     "task_update",
 				"task_id":  task.ID,
-				"progress": task.Progress,
-				"status":   task.Status,
+				"progress": progress,
+				"status":   status,
 			}
 		}(&task.SubTasks[i])
 	}
@@ -195,13 +245,17 @@ func executeTaskAsync(task *Task) {
 			logActionLocked(task, "Finalized", "JARVIS", "Goal achieved.")
 		}
 	}
+	progress, status := task.Progress, task.Status
 	mu.Unlock()
+
+	// The final word goes in the notebook too.
+	persistTask(task.ID)
 
 	broadcast <- map[string]interface{}{
 		"type":     "task_update",
 		"task_id":  task.ID,
-		"progress": task.Progress,
-		"status":   task.Status,
+		"progress": progress,
+		"status":   status,
 	}
 }
 
@@ -256,6 +310,7 @@ func createTask(w http.ResponseWriter, r *http.Request) {
 	tasks[id] = task
 	mu.Unlock()
 	taskQueue <- task
+	persistTask(id)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"task_id": id})
@@ -293,7 +348,52 @@ func stopTask(w http.ResponseWriter, r *http.Request) {
 		logActionLocked(t, "Stopped", "USER", "Process terminated by operator.")
 	}
 	mu.Unlock()
+	persistTask(id)
 	w.WriteHeader(http.StatusOK)
+}
+
+// listTasks returns the office history: every task, newest first, as light
+// summaries. Full detail (plan, log) comes from GET /task/{id}/status.
+func listTasks(w http.ResponseWriter, r *http.Request) {
+	// Summaries come from the notebook so history survives restarts.
+	// (Falls back to live memory in tests, where main() never ran.)
+	var rows []taskRow
+	if taskStore != nil {
+		var err error
+		rows, err = taskStore.AllTasks()
+		if err != nil {
+			http.Error(w, "notebook unavailable", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		mu.RLock()
+		for _, t := range tasks {
+			rows = append(rows, snapshotTask(t))
+		}
+		mu.RUnlock()
+		sort.Slice(rows, func(i, j int) bool { return rows[i].CreatedAt.After(rows[j].CreatedAt) })
+	}
+	type summary struct {
+		ID         string   `json:"id"`
+		Goal       string   `json:"goal"`
+		Status     string   `json:"status"`
+		Progress   int      `json:"progress"`
+		CreatedAt  string   `json:"created_at"`
+		Artifacts  []string `json:"artifacts"`
+		SubtaskCnt int      `json:"subtask_count"`
+	}
+	out := make([]summary, 0, len(rows))
+	for _, row := range rows {
+		var plan []SubTask
+		_ = json.Unmarshal([]byte(row.PlanJSON), &plan)
+		out = append(out, summary{
+			ID: row.ID, Goal: row.Goal, Status: row.Status, Progress: row.Progress,
+			CreatedAt: row.CreatedAt.UTC().Format(time.RFC3339),
+			Artifacts: row.Artifacts, SubtaskCnt: len(plan),
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"tasks": out})
 }
 
 func deployNFT(w http.ResponseWriter, r *http.Request) {
@@ -861,7 +961,42 @@ const indexHTML = `
 </html>
 `
 
+// artifactContentType picks a sensible Content-Type for a notebook-served file.
+func artifactContentType(name string) string {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".md":
+		return "text/markdown; charset=utf-8"
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".json":
+		return "application/json; charset=utf-8"
+	case ".csv":
+		return "text/csv; charset=utf-8"
+	default:
+		return "text/plain; charset=utf-8"
+	}
+}
+
 func main() {
+	// Pick the notebook, then restore everything it remembers.
+	taskStore = NewTaskStore()
+	if rows, err := taskStore.AllTasks(); err != nil {
+		log.Printf("[store] restore failed: %v", err)
+	} else {
+		mu.Lock()
+		for _, row := range rows {
+			if settled, changed := settleInterrupted(row); changed {
+				row = settled
+				if err := taskStore.UpsertTask(row); err != nil {
+					log.Printf("[store] settle %s: %v", row.ID, err)
+				}
+			}
+			tasks[row.ID] = row.toTask()
+		}
+		mu.Unlock()
+		log.Printf("[store] restored %d task(s) from the notebook", len(rows))
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -872,6 +1007,7 @@ func main() {
 
 	mux.HandleFunc("GET /ws", wsHandler)
 	mux.HandleFunc("POST /task", createTask)
+	mux.HandleFunc("GET /tasks", listTasks)
 	mux.HandleFunc("GET /task/{id}/status", getTaskStatus)
 	mux.HandleFunc("POST /task/{id}/stop", stopTask)
 	mux.HandleFunc("POST /deploy-nft", deployNFT)
@@ -937,6 +1073,14 @@ func getArtifact(w http.ResponseWriter, r *http.Request) {
 	if !known {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
+	}
+	// The notebook first: file contents survive restarts and redeploys there.
+	if taskStore != nil {
+		if content, err := taskStore.GetArtifact(id, name); err == nil {
+			w.Header().Set("Content-Type", artifactContentType(name))
+			fmt.Fprint(w, content)
+			return
+		}
 	}
 	dir, err := filepath.Abs(workspaceDir(id))
 	if err != nil {
